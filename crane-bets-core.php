@@ -35,7 +35,9 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             'RSS_News_Fetcher.php'   => 'Crane_RSS_News_Fetcher',
             'User_Prediction_Service.php' => 'Crane_User_Prediction_Service',
             'VIP_Email_Service.php'  => 'Crane_VIP_Email_Service',
-            'Avatar_Service.php'     => 'Crane_Avatar_Service'
+            'Security_Service.php'   => 'Crane_Security_Service',
+            'Avatar_Service.php'     => 'Crane_Avatar_Service',
+            'Free_Prediction_Scraper.php' => 'Crane_Free_Prediction_Scraper'
         );
 
         foreach ( $services as $file => $class ) {
@@ -109,7 +111,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         add_action( 'template_redirect', array( $this, 'block_cpt_direct_access' ) );
 
         // Cron Syncs — Prediction API
-        add_action( 'crane_sync_predictions_cron', array( 'Crane_Prediction_API_Service', 'sync_predictions' ) );
+        add_action( 'crane_sync_predictions_cron_v2', array( 'Crane_Prediction_API_Service', 'sync_predictions' ) );
         add_action( 'crane_sync_odds_cron', array( 'Crane_Prediction_API_Service', 'sync_odds' ) );
         add_action( 'crane_cleanup_predictions_cron', array( 'Crane_Prediction_API_Service', 'cleanup_old_predictions' ) );
 
@@ -144,6 +146,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         add_action( 'admin_menu', array( $this, 'crane_register_tools_menu' ) );
         add_action( 'admin_post_crane_import_demo', array( $this, 'crane_import_demo_data' ) );
         add_action( 'admin_post_crane_delete_demo', array( $this, 'crane_delete_demo_data' ) );
+        add_action( 'admin_post_crane_clear_logo_cache', array( $this, 'handle_clear_logo_cache' ) );
         add_action( 'admin_notices', array( $this, 'registration_admin_notice' ) );
 
         // Version-stamped upgrade check
@@ -234,7 +237,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
      * Covers zip re-uploads where register_activation_hook doesn't fire.
      */
     public function maybe_run_upgrade() {
-        $current_version = '1.0.0';
+        $current_version = '1.0.1';
         $stored_version  = get_option( 'crane_plugin_version', '0' );
         if ( $stored_version === $current_version ) return;
 
@@ -267,8 +270,10 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         }
 
         // Ensure CRONs exist (safe — wp_next_scheduled guards against dupes)
-        if ( ! wp_next_scheduled( 'crane_sync_predictions_cron' ) ) {
-            wp_schedule_event( time(), 'crane_30min', 'crane_sync_predictions_cron' );
+        $predictions_schedule = wp_get_schedule( 'crane_sync_predictions_cron_v2' );
+        if ( ! $predictions_schedule || $predictions_schedule !== 'crane_2hours' ) {
+            wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
+            wp_schedule_event( time(), 'crane_2hours', 'crane_sync_predictions_cron_v2' );
         }
         if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
             wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
@@ -283,6 +288,13 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         }
         if ( ! wp_next_scheduled( 'crane_fetch_news_cron' ) ) {
             wp_schedule_event( time(), 'hourly', 'crane_fetch_news_cron' );
+        }
+
+        if ( version_compare( $stored_version, '1.0.1', '<' ) ) {
+            wp_clear_scheduled_hook( 'crane_sync_predictions_cron' );
+            if ( function_exists( 'as_unschedule_all_actions' ) ) {
+                as_unschedule_all_actions( 'crane_sync_predictions_as' );
+            }
         }
 
         update_option( 'crane_plugin_version', $current_version );
@@ -377,8 +389,8 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         if ( ! function_exists( 'as_has_scheduled_action' ) ) return;
 
         // Replace 30min Sync with AS (High reliability)
-        if ( ! as_has_scheduled_action( 'crane_sync_predictions_as' ) ) {
-            as_schedule_recurring_action( time(), 1800, 'crane_sync_predictions_as' );
+        if ( ! as_has_scheduled_action( 'crane_sync_predictions_as_v2' ) ) {
+            as_schedule_recurring_action( time(), 7200, 'crane_sync_predictions_as_v2' );
         }
         
         // Replacement for Daily odds and cleanup if needed
@@ -853,10 +865,14 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
      */
     public function register_crane_settings() {
         register_setting('crane_api_options', 'crane_api_football_key');
+        register_setting('crane_api_options', 'crane_prediction_source');
+        register_setting('crane_api_options', 'crane_odds_api_key');
         register_setting('crane_api_options', 'crane_api_newsdata');
         register_setting('crane_api_options', 'crane_paystack_secret_key');
         register_setting('crane_api_options', 'crane_vip_product_id');
         register_setting('crane_api_options', 'crane_purge_on_uninstall');
+        register_setting('crane_api_options', 'crane_custom_rss_feeds');
+        register_setting('crane_api_options', 'crane_news_import_category');
         Crane_Commission_Admin::register_settings();
     }
 
@@ -864,6 +880,10 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         $schedules['crane_30min'] = array(
             'interval' => 1800,
             'display'  => 'Every 30 Minutes (Crane)'
+        );
+        $schedules['crane_2hours'] = array(
+            'interval' => 7200,
+            'display'  => 'Every 2 Hours (Crane)'
         );
         return $schedules;
     }
@@ -927,16 +947,62 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                 <?php do_settings_sections( 'crane_api_options' ); ?>
                 <table class="form-table">
                     <tr valign="top">
-                        <th scope="row">API-Football Key (RapidAPI)</th>
+                        <th scope="row">API-Football Key</th>
                         <td>
-                            <input type="password" name="crane_api_football_key" value="<?php echo esc_attr( get_option('crane_api_football_key') ); ?>" style="width:100%" placeholder="Enter your RapidAPI key for API-Football" />
-                            <p class="description">Get your free key at <a href="https://rapidapi.com/api-sports/api/api-football" target="_blank">rapidapi.com/api-sports/api/api-football</a> (100 requests/day free)</p>
+                            <input type="password" name="crane_api_football_key" value="<?php echo esc_attr( get_option('crane_api_football_key') ); ?>" style="width:100%" placeholder="Enter your API-Sports key" />
+                            <p class="description">Get your free key at <a href="https://dashboard.api-football.com/register" target="_blank">dashboard.api-football.com</a> (100 requests/day free)</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Prediction Source Selection</th>
+                        <td>
+                            <?php 
+                            $pred_source = get_option('crane_prediction_source', 'forebet_odds'); 
+                            ?>
+                            <select name="crane_prediction_source" style="width:100%">
+                                <option value="api_football" <?php selected( $pred_source, 'api_football' ); ?>>API-Football Only (Paid / Premium)</option>
+                                <option value="forebet" <?php selected( $pred_source, 'forebet' ); ?>>Forebet Only (Free / Mathematical)</option>
+                                <option value="odds_api" <?php selected( $pred_source, 'odds_api' ); ?>>The Odds API Only (Free Key Required)</option>
+                                <option value="forebet_odds" <?php selected( $pred_source, 'forebet_odds' ); ?>>Forebet + The Odds API (Both Free)</option>
+                                <option value="all" <?php selected( $pred_source, 'all' ); ?>>All Sources (API-Football + Forebet + The Odds API)</option>
+                            </select>
+                            <p class="description">Select where the system should import predictions from.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">The Odds API Key</th>
+                        <td>
+                            <input type="password" name="crane_odds_api_key" value="<?php echo esc_attr( get_option('crane_odds_api_key') ); ?>" style="width:100%" placeholder="Enter your The Odds API key" />
+                            <p class="description">Required if using The Odds API. Get a free key at <a href="https://the-odds-api.com" target="_blank">the-odds-api.com</a>.</p>
                         </td>
                     </tr>
                     <tr valign="top">
                         <th scope="row">NewsData.io API Key (News)</th>
                         <td>
                             <input type="password" name="crane_api_newsdata" value="<?php echo esc_attr( get_option('crane_api_newsdata') ); ?>" style="width:100%" placeholder="Enter NewsData.io Token" />
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Custom RSS Feeds</th>
+                        <td>
+                            <textarea name="crane_custom_rss_feeds" rows="5" style="width:100%" placeholder="Enter one RSS URL per line, e.g.&#10;http://feeds.bbci.co.uk/sport/football/rss.xml&#10;https://news.google.com/rss/search?q=sports"><?php echo esc_textarea( get_option('crane_custom_rss_feeds') ); ?></textarea>
+                            <p class="description">Enter one feed URL per line. If left empty, the system automatically falls back to BBC Sport Football RSS.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Target News Category</th>
+                        <td>
+                            <?php 
+                            $selected_cat = get_option('crane_news_import_category', '' );
+                            $categories = get_categories( array( 'hide_empty' => 0 ) );
+                            ?>
+                            <select name="crane_news_import_category" style="width:100%">
+                                <option value="">-- Default Category (Uncategorized) --</option>
+                                <?php foreach ( $categories as $cat ) : ?>
+                                    <option value="<?php echo esc_attr( $cat->slug ); ?>" <?php selected( $selected_cat, $cat->slug ); ?>><?php echo esc_html( $cat->name ); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description">Select the category all newly scraped articles will be automatically assigned to.</p>
                         </td>
                     </tr>
                     <tr valign="top">
@@ -969,9 +1035,16 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
                 <h2>Prediction Sync</h2>
                 <p>Sync status: Next automatic sync in <strong><?php
-                    $next = wp_next_scheduled( 'crane_sync_predictions_cron' );
+                    $next = wp_next_scheduled( 'crane_sync_predictions_cron_v2' );
                     echo $next ? human_time_diff( time(), $next ) : 'Not scheduled';
-                ?></strong></p>
+                ?></strong> &nbsp;<em style="color:#888;font-weight:normal;"><?php
+                    if ( $next ) {
+                        $tz = new DateTimeZone( 'Africa/Lagos' );
+                        $dt = new DateTime( '@' . $next );
+                        $dt->setTimezone( $tz );
+                        echo '(' . $dt->format( 'M j, g:i A' ) . ' WAT)';
+                    }
+                ?></em></p>
                 <p>API Key status: <strong><?php echo get_option('crane_api_football_key') ? 'Set' : 'Not set'; ?></strong></p>
                 <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
                     <input type="hidden" name="action" value="crane_manual_sync">
@@ -981,12 +1054,51 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             </div>
 
             <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
+                <h2>Free Predictions Scraper Sync</h2>
+                <p>Source selected: <strong><?php 
+                    $curr_src = get_option('crane_prediction_source', 'forebet_odds');
+                    $src_labels = [
+                        'api_football' => 'API-Football Only (Premium)',
+                        'forebet' => 'Forebet Only (Free)',
+                        'odds_api' => 'The Odds API Only (Free)',
+                        'forebet_odds' => 'Forebet + The Odds API (Free)',
+                        'all' => 'All Sources (API-Football + Free Sources)',
+                    ];
+                    echo esc_html( $src_labels[$curr_src] ?? $curr_src );
+                ?></strong></p>
+                <p>The Odds API Key status: <strong><?php echo get_option('crane_odds_api_key') ? 'Set' : 'Not set'; ?></strong></p>
+                <?php if ( isset( $_GET['free_imported'] ) ) : ?>
+                    <div class="notice notice-success inline"><p>Scraped & imported <?php echo intval($_GET['free_imported']); ?> predictions successfully!</p></div>
+                <?php endif; ?>
+                <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
+                    <input type="hidden" name="action" value="crane_manual_scraper_fetch">
+                    <?php wp_nonce_field( 'crane_free_scraper_fetch' ); ?>
+                    <button type="submit" class="button button-primary">Scrape & Sync Free Predictions Now</button>
+                </form>
+                <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
+                    <input type="hidden" name="action" value="crane_clear_logo_cache">
+                    <?php wp_nonce_field( 'crane_clear_logo_cache' ); ?>
+                    <button type="submit" class="button" onclick="return confirm('This will delete all cached team logos. They will be re-fetched correctly on next sync. Continue?')">&#x1F5D1; Clear Logo Cache</button>
+                    <?php if ( isset( $_GET['logo_cache_cleared'] ) ) : ?>
+                        <span style="color:green;margin-left:10px;">&#10003; Logo cache cleared (<?php echo intval( $_GET['cleared_count'] ?? 0 ); ?> entries removed) &mdash; logos will re-fetch correctly on next import.</span>
+                    <?php endif; ?>
+                </form>
+            </div>
+
+            <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
                 <h2>VIP Email Blast</h2>
                 <?php
                     $next_email = wp_next_scheduled( 'crane_vip_daily_email_cron' );
                     $vip_count_query = new WP_User_Query( array( 'meta_key' => 'crane_is_vip', 'meta_value' => '1', 'count_total' => true ) );
                 ?>
-                <p>Next scheduled email: <strong><?php echo $next_email ? date( 'M j, g:i A', $next_email ) : 'Not scheduled'; ?></strong></p>
+                <p>Next scheduled email: <strong><?php
+                    if ( $next_email ) {
+                        $tz_e = new DateTimeZone( 'Africa/Lagos' );
+                        $dt_e = new DateTime( '@' . $next_email );
+                        $dt_e->setTimezone( $tz_e );
+                        echo esc_html( $dt_e->format( 'M j, g:i A' ) . ' WAT' );
+                    } else { echo 'Not scheduled'; }
+                ?></strong></p>
                 <p>VIP members: <strong><?php echo $vip_count_query->get_total(); ?></strong></p>
                 <?php if ( absint( isset($_GET['vip_email_sent']) ? $_GET['vip_email_sent'] : 0 ) === 1 ) : ?>
                     <div class="notice notice-success inline"><p> VIP email sent successfully!</p></div>
@@ -1009,7 +1121,14 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                 <?php
                     $next_news = wp_next_scheduled( 'crane_fetch_news_cron' );
                 ?>
-                <p>Next automated fetch: <strong><?php echo $next_news ? date( 'M j, g:i A', $next_news ) : 'Not scheduled'; ?></strong></p>
+                <p>Next automated fetch: <strong><?php
+                    if ( $next_news ) {
+                        $tz_n = new DateTimeZone( 'Africa/Lagos' );
+                        $dt_n = new DateTime( '@' . $next_news );
+                        $dt_n->setTimezone( $tz_n );
+                        echo esc_html( $dt_n->format( 'M j, g:i A' ) . ' WAT' );
+                    } else { echo 'Not scheduled'; }
+                ?></strong></p>
                 
                 <?php if ( isset( $_GET['news_imported'] ) ) : ?>
                     <div class="notice notice-success inline"><p> Imported <?php echo intval($_GET['news_imported']); ?> new sports articles!</p></div>
@@ -1192,6 +1311,48 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
     }
 
     /**
+     * Clear all cached team logos (crane_logo_* options)
+     * Useful after bad logo matches (e.g. PSG resolved to Arsenal badge)
+     */
+    public function handle_clear_logo_cache() {
+        check_admin_referer( 'crane_clear_logo_cache' );
+        if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized' );
+
+        global $wpdb;
+        $deleted = $wpdb->query(
+            "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'crane\_logo\_%'"
+        );
+
+        // Fetch and update all existing prediction posts to use the corrected logo URLs
+        $posts = new WP_Query( array(
+            'post_type'      => 'crane_prediction',
+            'post_status'    => 'any',
+            'posts_per_page' => -1,
+            'fields'         => 'ids'
+        ) );
+
+        if ( ! empty( $posts->posts ) && class_exists( 'Crane_Prediction_API_Service' ) ) {
+            foreach ( $posts->posts as $pid ) {
+                $t1_name = get_post_meta( $pid, 'team1_name', true );
+                $t2_name = get_post_meta( $pid, 'team2_name', true );
+
+                if ( ! empty( $t1_name ) ) {
+                    $t1_logo = Crane_Prediction_API_Service::get_team_logo( $t1_name );
+                    update_post_meta( $pid, 'team1_logo', $t1_logo );
+                }
+                if ( ! empty( $t2_name ) ) {
+                    $t2_logo = Crane_Prediction_API_Service::get_team_logo( $t2_name );
+                    update_post_meta( $pid, 'team2_logo', $t2_logo );
+                }
+            }
+        }
+
+        $redirect = admin_url( 'admin.php?page=crane-api-settings&logo_cache_cleared=1&cleared_count=' . intval( $deleted ) );
+        wp_redirect( $redirect );
+        exit;
+    }
+
+    /**
      * Handle Manual VIP Assignments from Settings Dashboard
      */
     public function handle_manual_vip_assignment() {
@@ -1359,9 +1520,10 @@ function crane_bets_core_activation() {
     // 2. Setup Default Menu
     $menu_name = 'Crane Bets Main Menu';
     $menu_exists = wp_get_nav_menu_object( $menu_name );
+    $core = Crane_Bets_Core::get_instance();
+
     if ( ! $menu_exists ) {
         $menu_id = wp_create_nav_menu( $menu_name );
-        $core = Crane_Bets_Core::get_instance();
         $menu_items = array(
             array( 'title' => 'Home', 'url' => home_url('/') ),
             array( 'title' => 'News', 'url' => $core->get_crane_url('news') ),
@@ -1381,7 +1543,6 @@ function crane_bets_core_activation() {
             ) );
         }
 
-        // Re-assign menu to theme locations immediately for crane-bets-theme
         // Re-assign menu to theme locations immediately for active theme
         $theme_slug = get_template();
         $mods = get_option( "theme_mods_{$theme_slug}", array() );
@@ -1431,8 +1592,8 @@ function crane_bets_core_activation() {
     }
 
     // Schedule CRON jobs — moved here from constructor to avoid race condition with custom intervals
-    if ( ! wp_next_scheduled( 'crane_sync_predictions_cron' ) ) {
-        wp_schedule_event( time(), 'crane_30min', 'crane_sync_predictions_cron' );
+    if ( ! wp_next_scheduled( 'crane_sync_predictions_cron_v2' ) ) {
+        wp_schedule_event( time(), 'crane_2hours', 'crane_sync_predictions_cron_v2' );
     }
     if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
         wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
@@ -1455,6 +1616,7 @@ function crane_bets_core_activation() {
 register_deactivation_hook( __FILE__, 'crane_bets_core_deactivation' );
 function crane_bets_core_deactivation() {
     wp_clear_scheduled_hook( 'crane_sync_predictions_cron' );
+    wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
     wp_clear_scheduled_hook( 'crane_sync_odds_cron' );
     wp_clear_scheduled_hook( 'crane_cleanup_predictions_cron' );
     wp_clear_scheduled_hook( 'crane_vip_daily_email_cron' );

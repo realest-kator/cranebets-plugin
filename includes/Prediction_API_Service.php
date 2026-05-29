@@ -9,15 +9,15 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 
 class Crane_Prediction_API_Service {
 
-    // API-Football via RapidAPI
-    private static $api_host = 'api-football-v1.p.rapidapi.com';
-    private static $api_base = 'https://api-football-v1.p.rapidapi.com/v3';
+    // API-Football Direct API
+    private static $api_host = 'v3.football.api-sports.io';
+    private static $api_base = 'https://v3.football.api-sports.io';
 
     /**
      * Boot the service: Hook ActionScheduler actions
      */
     public static function boot() {
-        add_action( 'crane_sync_predictions_as', array( __CLASS__, 'sync_predictions' ) );
+        add_action( 'crane_sync_predictions_as_v2', array( __CLASS__, 'sync_predictions' ) );
         add_action( 'crane_cleanup_old_predictions_as', array( __CLASS__, 'cleanup_old_predictions' ) );
     }
 
@@ -54,8 +54,7 @@ class Crane_Prediction_API_Service {
         $response = wp_remote_get( $url, array(
             'timeout' => 15,
             'headers' => array(
-                'x-rapidapi-host' => self::$api_host,
-                'x-rapidapi-key'  => $api_key,
+                'x-apisports-key'  => $api_key,
             ),
         ) );
 
@@ -79,32 +78,157 @@ class Crane_Prediction_API_Service {
     }
 
     /**
-     * Fetch a club logo from TheSportsDB (cached permanently)
+     * Fetch a club logo (cached permanently).
+     * Uses a fast built-in popular teams mapping, queries API-Football if available,
+     * and strictly validates TheSportsDB results to avoid wrong logo assignments.
      */
     public static function get_team_logo( $team_name ) {
         $cache_key = 'crane_logo_' . sanitize_title( $team_name );
         $cached = get_option( $cache_key );
-        if ( $cached ) return $cached;
+        if ( $cached !== false ) {
+            return $cached === 'none' ? '' : $cached;
+        }
 
-        // Try TheSportsDB search
-        $url = self::$logo_base . '/searchteams.php?t=' . urlencode( $team_name );
-        $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
+        $team_norm = strtolower( trim( preg_replace( '/[^a-z0-9]/i', '', $team_name ) ) );
 
-        if ( is_wp_error( $response ) ) return '';
+        // 1. Built-in Popular Team Mapping to prevent any API calls for top clubs
+        $popular_logos = array(
+            'parissaintgermain'    => 'https://media.api-sports.io/football/teams/85.png',
+            'psg'                  => 'https://media.api-sports.io/football/teams/85.png',
+            'parissg'              => 'https://media.api-sports.io/football/teams/85.png',
+            'saintetienne'         => 'https://media.api-sports.io/football/teams/228.png',
+            'nice'                 => 'https://media.api-sports.io/football/teams/84.png',
+            'ogcnice'              => 'https://media.api-sports.io/football/teams/84.png',
+            'asse'                 => 'https://media.api-sports.io/football/teams/228.png',
+            'stetienne'            => 'https://media.api-sports.io/football/teams/228.png',
+            'brest'                => 'https://media.api-sports.io/football/teams/106.png',
+            'rennes'               => 'https://media.api-sports.io/football/teams/94.png',
+            'staderennais'         => 'https://media.api-sports.io/football/teams/94.png',
+            'lille'                => 'https://media.api-sports.io/football/teams/79.png',
+            'lens'                 => 'https://media.api-sports.io/football/teams/116.png',
+            'reims'                => 'https://media.api-sports.io/football/teams/93.png',
+            'toulouse'             => 'https://media.api-sports.io/football/teams/96.png',
+            'montpellier'          => 'https://media.api-sports.io/football/teams/82.png',
+            'strasbourg'           => 'https://media.api-sports.io/football/teams/95.png',
+            'lehavre'              => 'https://media.api-sports.io/football/teams/1063.png',
+            'auxerre'              => 'https://media.api-sports.io/football/teams/77.png',
+            'angers'               => 'https://media.api-sports.io/football/teams/76.png',
+            'nantes'               => 'https://media.api-sports.io/football/teams/83.png',
+            'arsenal'              => 'https://media.api-sports.io/football/teams/42.png',
+            'chelsea'              => 'https://media.api-sports.io/football/teams/49.png',
+            'manchesterunited'     => 'https://media.api-sports.io/football/teams/33.png',
+            'manunited'            => 'https://media.api-sports.io/football/teams/33.png',
+            'manutd'               => 'https://media.api-sports.io/football/teams/33.png',
+            'manchestercity'       => 'https://media.api-sports.io/football/teams/50.png',
+            'mancity'              => 'https://media.api-sports.io/football/teams/50.png',
+            'liverpool'            => 'https://media.api-sports.io/football/teams/40.png',
+            'tottenham'            => 'https://media.api-sports.io/football/teams/47.png',
+            'tottenhamhotspur'     => 'https://media.api-sports.io/football/teams/47.png',
+            'realmadrid'           => 'https://media.api-sports.io/football/teams/541.png',
+            'barcelona'            => 'https://media.api-sports.io/football/teams/529.png',
+            'fcbarcelona'          => 'https://media.api-sports.io/football/teams/529.png',
+            'atleticomadrid'       => 'https://media.api-sports.io/football/teams/530.png',
+            'bayernmunich'         => 'https://media.api-sports.io/football/teams/157.png',
+            'bayern'               => 'https://media.api-sports.io/football/teams/157.png',
+            'dortmund'             => 'https://media.api-sports.io/football/teams/165.png',
+            'borussiadortmund'     => 'https://media.api-sports.io/football/teams/165.png',
+            'juventus'             => 'https://media.api-sports.io/football/teams/496.png',
+            'acmilan'              => 'https://media.api-sports.io/football/teams/489.png',
+            'milan'                => 'https://media.api-sports.io/football/teams/489.png',
+            'intermilan'           => 'https://media.api-sports.io/football/teams/505.png',
+            'inter'                => 'https://media.api-sports.io/football/teams/505.png',
+            'napoli'               => 'https://media.api-sports.io/football/teams/492.png',
+            'roma'                 => 'https://media.api-sports.io/football/teams/497.png',
+            'asroma'               => 'https://media.api-sports.io/football/teams/497.png',
+            'marseille'            => 'https://media.api-sports.io/football/teams/81.png',
+            'olympiquemarseille'   => 'https://media.api-sports.io/football/teams/81.png',
+            'monaco'               => 'https://media.api-sports.io/football/teams/91.png',
+            'asmonaco'             => 'https://media.api-sports.io/football/teams/91.png',
+            'lyon'                 => 'https://media.api-sports.io/football/teams/80.png',
+            'olympiquelyonnais'    => 'https://media.api-sports.io/football/teams/80.png',
+            'ajax'                 => 'https://media.api-sports.io/football/teams/194.png',
+            'feyenoord'            => 'https://media.api-sports.io/football/teams/197.png',
+            'psv'                  => 'https://media.api-sports.io/football/teams/197.png',
+            'psveindhoven'         => 'https://media.api-sports.io/football/teams/197.png',
+            'porto'                => 'https://media.api-sports.io/football/teams/229.png',
+            'fcporto'              => 'https://media.api-sports.io/football/teams/229.png',
+            'benfica'              => 'https://media.api-sports.io/football/teams/230.png',
+        );
 
-        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+        if ( isset( $popular_logos[$team_norm] ) ) {
+            $logo = $popular_logos[$team_norm];
+            update_option( $cache_key, $logo, false );
+            return $logo;
+        }
+
         $logo = '';
 
-        if ( ! empty( $body['teams'][0]['strBadge'] ) ) {
-            $logo = $body['teams'][0]['strBadge'];
-        } elseif ( ! empty( $body['teams'][0]['strTeamBadge'] ) ) {
-            $logo = $body['teams'][0]['strTeamBadge'];
+        // 2. Try API-Football Search (100% accurate, no demo restrictions) if key is set
+        $apif_key = self::get_api_key();
+        if ( ! empty( $apif_key ) ) {
+            $url = self::$api_base . '/teams?search=' . urlencode( $team_name );
+            $response = wp_remote_get( $url, array(
+                'timeout' => 10,
+                'headers' => array( 'x-apisports-key' => $apif_key )
+            ) );
+
+            if ( ! is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) === 200 ) {
+                $body = json_decode( wp_remote_retrieve_body( $response ), true );
+                if ( ! empty( $body['response'] ) && is_array( $body['response'] ) ) {
+                    $best_match = null;
+                    $best_score = PHP_INT_MAX;
+
+                    foreach ( $body['response'] as $item ) {
+                        $candidate = $item['team']['name'] ?? '';
+                        $candidate_norm = strtolower( preg_replace( '/[^a-z0-9]/i', '', $candidate ) );
+
+                        if ( $candidate_norm === $team_norm ) {
+                            $best_match = $item['team'];
+                            break;
+                        }
+
+                        $dist = levenshtein( $team_norm, $candidate_norm );
+                        if ( $dist < $best_score ) {
+                            $best_score = $dist;
+                            $best_match = $item['team'];
+                        }
+                    }
+
+                    // Strict matching limit for search queries
+                    if ( $best_match && $best_score <= 4 ) {
+                        $logo = $best_match['logo'] ?? '';
+                    }
+                }
+            }
         }
 
-        // Cache permanently (logos don't change)
-        if ( $logo ) {
-            update_option( $cache_key, $logo, false );
+        // 3. Fallback: Try TheSportsDB with STRICT similarity check (edit distance <= 2)
+        if ( empty( $logo ) ) {
+            $url = self::$logo_base . '/searchteams.php?t=' . urlencode( $team_name );
+            $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
+
+            if ( ! is_wp_error( $response ) ) {
+                $body = json_decode( wp_remote_retrieve_body( $response ), true );
+                if ( ! empty( $body['teams'] ) && is_array( $body['teams'] ) ) {
+                    foreach ( $body['teams'] as $team ) {
+                        $candidate = $team['strTeam'] ?? '';
+                        $candidate_norm = strtolower( preg_replace( '/[^a-z0-9]/i', '', $candidate ) );
+
+                        if ( $candidate_norm === $team_norm || levenshtein( $team_norm, $candidate_norm ) <= 2 ) {
+                            if ( ! empty( $team['strBadge'] ) ) {
+                                $logo = $team['strBadge'];
+                            } elseif ( ! empty( $team['strTeamBadge'] ) ) {
+                                $logo = $team['strTeamBadge'];
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
+
+        // Cache response (even if empty, so we don't spam requests for unmapped/failed logos)
+        update_option( $cache_key, $logo ?: 'none', false );
 
         return $logo;
     }
@@ -114,6 +238,12 @@ class Crane_Prediction_API_Service {
      * This runs via WP Cron every 30 minutes
      */
     public static function sync_predictions() {
+        $source = get_option( 'crane_prediction_source', 'forebet_odds' );
+        if ( ! in_array( $source, array( 'api_football', 'all' ), true ) ) {
+            error_log( 'Crane Predictions Sync: API-Football not selected. Skipping.' );
+            return;
+        }
+
         $api_key = self::get_api_key();
         if ( empty( $api_key ) ) {
             error_log( 'Crane Predictions Sync: No API key set. Skipping.' );
@@ -128,7 +258,7 @@ class Crane_Prediction_API_Service {
         $fixtures = self::api_request( '/fixtures', array(
             'date'     => $today,
             'timezone' => 'Africa/Lagos',
-        ), 15 ); // Cache for 15 minutes
+        ), 120 ); // Cache for 120 minutes
 
         if ( ! $fixtures ) {
             error_log( 'Crane Predictions Sync: No fixtures returned for ' . $today );
@@ -234,22 +364,28 @@ class Crane_Prediction_API_Service {
             // NEW: Fetch and Store Real API Prediction (Hardened)
             $existing_tip = get_post_meta( $post_id, '_crane_free_tip', true );
             static $pred_count = 0;
-            $pred_limit = 10; // Max 10 premium API tips per sync cycle to save quota
+            $pred_limit = 5; // Max 5 premium API tips per sync cycle to save quota
 
             if ( empty( $existing_tip ) && $status_short === 'NS' && $pred_count < $pred_limit ) {
-                $pred_data = self::api_request( '/predictions', array( 'fixture' => $fixture_id ) );
+                $last_check = (int) get_post_meta( $post_id, '_crane_last_api_check', true );
+                $now = time();
                 
-                // Array Safety Check (Fatal Error Prevention)
-                if ( is_array( $pred_data ) && isset( $pred_data[0]['predictions'] ) ) {
-                    $winner_name = !empty($pred_data[0]['predictions']['winner']['name']) ? $pred_data[0]['predictions']['winner']['name'] : '';
-                    if ( $winner_name ) {
-                        update_post_meta( $post_id, '_crane_free_tip', $winner_name . ' Win' );
+                // 24-hour cooldown (86400 seconds) to prevent spamming empty API predictions
+                if ( ! $last_check || ( $now - $last_check ) > 86400 ) {
+                    $pred_data = self::api_request( '/predictions', array( 'fixture' => $fixture_id ) );
+                    update_post_meta( $post_id, '_crane_last_api_check', $now );
+                    $pred_count++; // Increment quota counter since we made an API request
+                    
+                    // Array Safety Check (Fatal Error Prevention)
+                    if ( is_array( $pred_data ) && ! empty( $pred_data ) && isset( $pred_data[0]['predictions'] ) ) {
+                        $winner_name = !empty($pred_data[0]['predictions']['winner']['name']) ? $pred_data[0]['predictions']['winner']['name'] : '';
+                        if ( $winner_name ) {
+                            update_post_meta( $post_id, '_crane_free_tip', $winner_name . ' Win' );
+                        }
+                        
+                        // Persist the entire rich analysis block for the Single Template
+                        update_post_meta( $post_id, '_crane_prediction_analysis', json_encode( $pred_data[0] ) );
                     }
-                    
-                    // Persist the entire rich analysis block for the Single Template
-                    update_post_meta( $post_id, '_crane_prediction_analysis', json_encode( $pred_data[0] ) );
-                    
-                    $pred_count++;
                 }
             }
 
@@ -264,6 +400,11 @@ class Crane_Prediction_API_Service {
      * Runs once per day
      */
     public static function sync_odds() {
+        $source = get_option( 'crane_prediction_source', 'forebet_odds' );
+        if ( ! in_array( $source, array( 'api_football', 'all' ), true ) ) {
+            return;
+        }
+
         $api_key = self::get_api_key();
         if ( empty( $api_key ) ) return;
 
