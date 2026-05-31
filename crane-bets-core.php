@@ -113,7 +113,12 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         // Cron Syncs — Prediction API
         add_action( 'crane_sync_predictions_cron_v2', array( 'Crane_Prediction_API_Service', 'sync_predictions' ) );
         add_action( 'crane_sync_odds_cron', array( 'Crane_Prediction_API_Service', 'sync_odds' ) );
+        // Cleanup hooked to BOTH services so it always runs regardless of source setting
         add_action( 'crane_cleanup_predictions_cron', array( 'Crane_Prediction_API_Service', 'cleanup_old_predictions' ) );
+        add_action( 'crane_cleanup_predictions_cron', array( 'Crane_Free_Prediction_Scraper', 'cleanup_old_predictions' ) );
+
+        // Manual purge old predictions
+        add_action( 'admin_post_crane_purge_old_predictions', array( $this, 'handle_purge_old_predictions' ) );
 
         // Manual sync trigger
         add_action( 'admin_post_crane_manual_sync', array( 'Crane_Prediction_API_Service', 'handle_manual_sync' ) );
@@ -1083,7 +1088,29 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                         <span style="color:green;margin-left:10px;">&#10003; Logo cache cleared (<?php echo intval( $_GET['cleared_count'] ?? 0 ); ?> entries removed) &mdash; logos will re-fetch correctly on next import.</span>
                     <?php endif; ?>
                 </form>
+                <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
+                    <input type="hidden" name="action" value="crane_purge_old_predictions">
+                    <?php wp_nonce_field( 'crane_purge_old_predictions' ); ?>
+                    <button type="submit" class="button button-link-delete" style="color:#d63638;" onclick="return confirm('This will permanently delete all past predictions (match_date before today). Continue?')">&#x1F5D1; Purge Past Predictions</button>
+                    <?php if ( isset( $_GET['old_preds_purged'] ) ) : ?>
+                        <span style="color:green;margin-left:10px;">&#10003; Deleted <?php echo intval( $_GET['purged_count'] ?? 0 ); ?> past predictions. Front-page cache also cleared.</span>
+                    <?php endif; ?>
+                </form>
+                <?php
+                // Show off-season status so admin can see why Africa fallback triggers
+                $tz_os = new DateTimeZone( 'Africa/Lagos' );
+                $now_os = new DateTime( 'now', $tz_os );
+                $m_os = (int) $now_os->format( 'n' );
+                $d_os = (int) $now_os->format( 'j' );
+                $is_os = ( $m_os === 6 || $m_os === 7 ) || ( $m_os === 5 && $d_os >= 16 ) || ( $m_os === 8 && $d_os <= 14 );
+                ?>
+                <p style="margin-top:12px; font-size:12px; color:<?php echo $is_os ? '#d63638' : '#00a32a'; ?>;">
+                    <strong>European Season Status:</strong>
+                    <?php echo $is_os ? '&#x1F534; OFF-SEASON — Africa/World fallback leagues will be used.' : '&#x1F7E2; IN SEASON — European leagues are active.'; ?>
+                    (Today: <?php echo esc_html( $now_os->format( 'M j, Y' ) ); ?> WAT)
+                </p>
             </div>
+
 
             <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
                 <h2>VIP Email Blast</h2>
@@ -1349,6 +1376,30 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
 
         $redirect = admin_url( 'admin.php?page=crane-api-settings&logo_cache_cleared=1&cleared_count=' . intval( $deleted ) );
         wp_redirect( $redirect );
+        exit;
+    }
+
+    /**
+     * Manually purge all past crane_prediction posts (match_date < today WAT)
+     */
+    public function handle_purge_old_predictions() {
+        check_admin_referer( 'crane_purge_old_predictions' );
+        if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized' );
+
+        $deleted = 0;
+        if ( class_exists( 'Crane_Free_Prediction_Scraper' ) ) {
+            $deleted += Crane_Free_Prediction_Scraper::cleanup_old_predictions();
+        }
+        if ( class_exists( 'Crane_Prediction_API_Service' ) ) {
+            // Also trigger the API service cleanup for any API-football sourced posts
+            Crane_Prediction_API_Service::cleanup_old_predictions();
+        }
+
+        // Clear front-page transients so stale HTML is gone immediately
+        delete_transient( 'crane_front_matches_html' );
+        delete_transient( 'crane_front_locker_preview' );
+
+        wp_redirect( admin_url( 'admin.php?page=crane-api-settings&old_preds_purged=1&purged_count=' . intval( $deleted ) ) );
         exit;
     }
 

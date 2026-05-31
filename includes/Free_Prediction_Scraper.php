@@ -69,6 +69,12 @@ class Crane_Free_Prediction_Scraper {
         'soccer_portugal_primeira_liga',
         'soccer_nigeria_npfl',
         'soccer_africa_caf_champions_league',
+        'soccer_brazil_campeonato',
+        'soccer_usa_mls',
+        'soccer_argentina_primera_division',
+        'soccer_turkey_super_league',
+        'soccer_greece_super_league',
+        'soccer_saudi_arabio_premiere_league',
     ];
 
     /**
@@ -93,6 +99,9 @@ class Crane_Free_Prediction_Scraper {
      * Run all enabled free sources based on admin setting
      */
     public static function run() {
+        // Always clean up old predictions first (delete yesterday and older)
+        self::cleanup_old_predictions();
+
         $source = get_option( 'crane_prediction_source', 'forebet_odds' );
         $imported = 0;
 
@@ -104,8 +113,65 @@ class Crane_Free_Prediction_Scraper {
             $imported += self::fetch_odds_api();
         }
 
+        // Invalidate the front-page matches transient so fresh data is shown immediately
+        delete_transient( 'crane_front_matches_html' );
+        delete_transient( 'crane_front_locker_preview' );
+
         error_log( "Crane Free Scraper: Total {$imported} predictions imported." );
         return $imported;
+    }
+
+    /**
+     * Delete crane_prediction posts whose match_date is before today (WAT).
+     * Runs at the start of every scrape cycle.
+     */
+    public static function cleanup_old_predictions() {
+        $tz      = new DateTimeZone( 'Africa/Lagos' );
+        $today   = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+
+        $old = new WP_Query( [
+            'post_type'      => 'crane_prediction',
+            'post_status'    => 'any',
+            'posts_per_page' => 200,
+            'fields'         => 'ids',
+            'meta_query'     => [
+                'relation' => 'OR',
+                [
+                    // Has a match_date set and it is before today
+                    'key'     => 'match_date',
+                    'value'   => $today,
+                    'compare' => '<',
+                    'type'    => 'DATE',
+                ],
+                [
+                    // Also delete posts where match_date is not set at all but post is older than 2 days
+                    'key'     => 'match_date',
+                    'compare' => 'NOT EXISTS',
+                ],
+            ],
+        ] );
+
+        $deleted = 0;
+        foreach ( $old->posts as $pid ) {
+            // Extra guard: if match_date is today, skip
+            $match_date = get_post_meta( $pid, 'match_date', true );
+            if ( $match_date === $today ) continue;
+
+            // If no match_date, only delete posts older than 2 days
+            if ( empty( $match_date ) ) {
+                $post_date = get_post_field( 'post_date', $pid );
+                if ( $post_date && strtotime( $post_date ) > strtotime( '-2 days' ) ) continue;
+            }
+
+            wp_delete_post( $pid, true );
+            $deleted++;
+        }
+        wp_reset_postdata();
+
+        if ( $deleted > 0 ) {
+            error_log( "Crane Cleanup: Deleted {$deleted} past predictions (before {$today})." );
+        }
+        return $deleted;
     }
 
     // =========================================================================
@@ -671,11 +737,25 @@ class Crane_Free_Prediction_Scraper {
     }
 
     /**
-     * June & July = European off-season
+     * Detect European off-season:
+     * - Most leagues end mid-May (Champions League final is ~late May).
+     * - New seasons start mid-August.
+     * - Off-season window: May 16 – August 14.
      */
     private static function is_off_season() {
-        $month = (int) current_time( 'n' ); // 1–12
-        return ( $month === 6 || $month === 7 );
+        $tz    = new DateTimeZone( 'Africa/Lagos' );
+        $now   = new DateTime( 'now', $tz );
+        $month = (int) $now->format( 'n' );
+        $day   = (int) $now->format( 'j' );
+
+        // June and July are always off-season
+        if ( $month === 6 || $month === 7 ) return true;
+        // Second half of May (after Champions League final week)
+        if ( $month === 5 && $day >= 16 ) return true;
+        // First half of August (before new seasons begin)
+        if ( $month === 8 && $day <= 14 ) return true;
+
+        return false;
     }
 
     /**
