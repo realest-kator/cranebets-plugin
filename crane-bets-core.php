@@ -965,13 +965,13 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                             $pred_source = get_option('crane_prediction_source', 'forebet_odds'); 
                             ?>
                             <select name="crane_prediction_source" style="width:100%">
-                                <option value="api_football" <?php selected( $pred_source, 'api_football' ); ?>>API-Football Only (Paid / Premium)</option>
-                                <option value="forebet" <?php selected( $pred_source, 'forebet' ); ?>>Forebet Only (Free / Mathematical)</option>
-                                <option value="odds_api" <?php selected( $pred_source, 'odds_api' ); ?>>The Odds API Only (Free Key Required)</option>
-                                <option value="forebet_odds" <?php selected( $pred_source, 'forebet_odds' ); ?>>Forebet + The Odds API (Both Free)</option>
-                                <option value="all" <?php selected( $pred_source, 'all' ); ?>>All Sources (API-Football + Forebet + The Odds API)</option>
+                                <option value="api_football" <?php selected( $pred_source, 'api_football' ); ?>>API-Football Only (Free: 100 req/day — fixtures, live scores, logos)</option>
+                                <option value="forebet" <?php selected( $pred_source, 'forebet' ); ?>>Forebet Only (Free — mathematical predictions, no key needed)</option>
+                                <option value="odds_api" <?php selected( $pred_source, 'odds_api' ); ?>>The Odds API Only (Free key required — real bookmaker odds)</option>
+                                <option value="forebet_odds" <?php selected( $pred_source, 'forebet_odds' ); ?>>Forebet + The Odds API (Both Free — bulk predictions + odds)</option>
+                                <option value="all" <?php selected( $pred_source, 'all' ); ?>>⭐ All Sources — Recommended (API-Football + Forebet + Odds API)</option>
                             </select>
-                            <p class="description">Select where the system should import predictions from.</p>
+                            <p class="description">Select where predictions are imported from. <strong>"All Sources" is recommended</strong> — API-Football (free: fixtures, live scores, team logos, 5 prediction tips/cycle) + Forebet (bulk mathematical predictions) + Odds API (bookmaker odds). Combined quota stays well within all free limits.</p>
                         </td>
                     </tr>
                     <tr valign="top">
