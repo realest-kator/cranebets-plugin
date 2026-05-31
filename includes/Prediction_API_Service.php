@@ -162,41 +162,70 @@ class Crane_Prediction_API_Service {
         }
 
         $logo = '';
+        $api_failed = false;
 
-        // 2. Try API-Football Search (100% accurate, no demo restrictions) if key is set
+        // 2. Try API-Football Search (100% accurate) if key is set
         $apif_key = self::get_api_key();
         if ( ! empty( $apif_key ) ) {
-            $url = self::$api_base . '/teams?search=' . urlencode( $team_name );
+            // Introduce a 1-second sleep to prevent hitting the 10 req/min rate limit on free tier
+            sleep(1);
+
+            $is_rapidapi = ( strlen( $apif_key ) > 35 );
+            if ( $is_rapidapi ) {
+                $url = 'https://api-football-v1.p.rapidapi.com/v3/teams?search=' . urlencode( $team_name );
+                $headers = array(
+                    'x-rapidapi-key'  => $apif_key,
+                    'x-rapidapi-host' => 'api-football-v1.p.rapidapi.com',
+                );
+            } else {
+                $url = 'https://v3.football.api-sports.io/teams?search=' . urlencode( $team_name );
+                $headers = array(
+                    'x-apisports-key' => $apif_key,
+                );
+            }
+
             $response = wp_remote_get( $url, array(
-                'timeout' => 10,
-                'headers' => array( 'x-apisports-key' => $apif_key )
+                'timeout' => 12,
+                'headers' => $headers,
             ) );
 
-            if ( ! is_wp_error( $response ) && wp_remote_retrieve_response_code( $response ) === 200 ) {
-                $body = json_decode( wp_remote_retrieve_body( $response ), true );
-                if ( ! empty( $body['response'] ) && is_array( $body['response'] ) ) {
-                    $best_match = null;
-                    $best_score = PHP_INT_MAX;
+            if ( is_wp_error( $response ) ) {
+                $api_failed = true;
+            } else {
+                $code = wp_remote_retrieve_response_code( $response );
+                if ( $code !== 200 && $code !== 201 ) {
+                    $api_failed = true;
+                } else {
+                    $body = json_decode( wp_remote_retrieve_body( $response ), true );
+                    if ( ! empty( $body['errors'] ) ) {
+                        $api_failed = true;
+                    } elseif ( ! empty( $body['response'] ) && is_array( $body['response'] ) ) {
+                        $best_match = null;
+                        $best_score = PHP_INT_MAX;
 
-                    foreach ( $body['response'] as $item ) {
-                        $candidate = $item['team']['name'] ?? '';
-                        $candidate_norm = strtolower( preg_replace( '/[^a-z0-9]/i', '', $candidate ) );
+                        foreach ( $body['response'] as $item ) {
+                            $candidate = $item['team']['name'] ?? '';
+                            $candidate_norm = strtolower( preg_replace( '/[^a-z0-9]/i', '', $candidate ) );
 
-                        if ( $candidate_norm === $team_norm ) {
-                            $best_match = $item['team'];
-                            break;
+                            $is_match = ( $candidate_norm === $team_norm ) || ( levenshtein( $team_norm, $candidate_norm ) <= 3 );
+                            if ( ! $is_match && strlen( $team_norm ) >= 3 && strlen( $candidate_norm ) >= 3 ) {
+                                if ( strpos( $candidate_norm, $team_norm ) !== false || strpos( $team_norm, $candidate_norm ) !== false ) {
+                                    $is_match = true;
+                                }
+                            }
+
+                            if ( $is_match ) {
+                                $dist = levenshtein( $team_norm, $candidate_norm );
+                                if ( $dist < $best_score ) {
+                                    $best_score = $dist;
+                                    $best_match = $item['team'];
+                                }
+                            }
                         }
 
-                        $dist = levenshtein( $team_norm, $candidate_norm );
-                        if ( $dist < $best_score ) {
-                            $best_score = $dist;
-                            $best_match = $item['team'];
+                        if ( $best_match ) {
+                            $logo = $best_match['logo'] ?? '';
                         }
-                    }
-
-                    // Strict matching limit for search queries
-                    if ( $best_match && $best_score <= 4 ) {
-                        $logo = $best_match['logo'] ?? '';
                     }
                 }
             }
@@ -235,7 +264,12 @@ class Crane_Prediction_API_Service {
         }
 
         // Cache response (even if empty, so we don't spam requests for unmapped/failed logos)
-        update_option( $cache_key, $logo ?: 'none', false );
+        // BUT do not cache 'none' if the API call failed due to rate limiting or connection errors
+        if ( ! empty( $logo ) ) {
+            update_option( $cache_key, $logo, false );
+        } elseif ( ! $api_failed ) {
+            update_option( $cache_key, 'none', false );
+        }
 
         return $logo;
     }
