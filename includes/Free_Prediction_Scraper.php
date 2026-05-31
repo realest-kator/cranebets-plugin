@@ -862,6 +862,10 @@ class Crane_Free_Prediction_Scraper {
             wp_die( 'Unauthorized.' );
         }
 
+        // Clear cached 'none' team logos so they can be re-fetched with the new smart matching logic
+        global $wpdb;
+        $wpdb->query( "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'crane_logo_%' AND option_value = 'none'" );
+
         // Force fresh run by clearing transients
         delete_transient( 'crane_forebet_last_run' );
         delete_transient( 'crane_oddsapi_last_run' );

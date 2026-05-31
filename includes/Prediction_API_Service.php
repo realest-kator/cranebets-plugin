@@ -202,7 +202,7 @@ class Crane_Prediction_API_Service {
             }
         }
 
-        // 3. Fallback: Try TheSportsDB with STRICT similarity check (edit distance <= 2)
+        // 3. Fallback: Try TheSportsDB with STRICT similarity check (edit distance <= 3 + substring matching)
         if ( empty( $logo ) ) {
             $url = self::$logo_base . '/searchteams.php?t=' . urlencode( $team_name );
             $response = wp_remote_get( $url, array( 'timeout' => 10 ) );
@@ -214,7 +214,14 @@ class Crane_Prediction_API_Service {
                         $candidate = $team['strTeam'] ?? '';
                         $candidate_norm = strtolower( preg_replace( '/[^a-z0-9]/i', '', $candidate ) );
 
-                        if ( $candidate_norm === $team_norm || levenshtein( $team_norm, $candidate_norm ) <= 2 ) {
+                        $is_match = ( $candidate_norm === $team_norm ) || ( levenshtein( $team_norm, $candidate_norm ) <= 3 );
+                        if ( ! $is_match && strlen( $team_norm ) >= 3 && strlen( $candidate_norm ) >= 3 ) {
+                            if ( strpos( $candidate_norm, $team_norm ) !== false || strpos( $team_norm, $candidate_norm ) !== false ) {
+                                $is_match = true;
+                            }
+                        }
+
+                        if ( $is_match ) {
                             if ( ! empty( $team['strBadge'] ) ) {
                                 $logo = $team['strBadge'];
                             } elseif ( ! empty( $team['strTeamBadge'] ) ) {
