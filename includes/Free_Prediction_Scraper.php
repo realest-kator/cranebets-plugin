@@ -164,12 +164,37 @@ class Crane_Free_Prediction_Scraper {
         delete_transient( 'crane_front_locker_preview' );
         delete_transient( 'crane_front_matches_pool' ); // Load More pool
 
+        // Purge page caching plugins so front-end displays updates immediately
+        self::purge_page_caches();
+
         error_log( "Crane Free Scraper: Total {$total} predictions imported (Forebet: {$forebet_imported}, Odds API: {$odds_imported})." );
         return [
             'total'   => $total,
             'forebet' => $forebet_imported,
             'odds'    => $odds_imported,
         ];
+    }
+
+    /**
+     * Purge all major page caching plugins to display fresh updates immediately
+     */
+    public static function purge_page_caches() {
+        // WP Rocket
+        if ( function_exists( 'rocket_clean_domain' ) ) {
+            rocket_clean_domain();
+        }
+        // LiteSpeed Cache
+        if ( class_exists( 'LiteSpeed_Cache_API' ) ) {
+            LiteSpeed_Cache_API::purge_all();
+        }
+        // W3 Total Cache
+        if ( function_exists( 'w3tc_pgcache_flush' ) ) {
+            w3tc_pgcache_flush();
+        }
+        // WP Fastest Cache
+        if ( function_exists( 'wp_fastest_cache_delete_cache' ) ) {
+            wp_fastest_cache_delete_cache();
+        }
     }
 
     /**

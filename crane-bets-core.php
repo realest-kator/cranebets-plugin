@@ -1455,6 +1455,10 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         delete_transient( 'crane_front_locker_preview' );
         delete_transient( 'crane_front_matches_pool' );
 
+        if ( class_exists( 'Crane_Free_Prediction_Scraper' ) ) {
+            Crane_Free_Prediction_Scraper::purge_page_caches();
+        }
+
         wp_redirect( admin_url( 'admin.php?page=crane-api-settings&old_preds_purged=1&purged_count=' . intval( $deleted ) ) );
         exit;
     }
