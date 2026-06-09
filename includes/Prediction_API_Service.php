@@ -375,18 +375,29 @@ class Crane_Prediction_API_Service {
             $status_short = isset($fixture['fixture']['status']['short']) ? $fixture['fixture']['status']['short'] : 'NS';
             $match_date   = isset($fixture['fixture']['date']) ? $fixture['fixture']['date'] : '';
 
-            // Parse time
-            $match_dt = new DateTime( $match_date, $tz );
-            $time_display = $match_dt->format( 'H:i' );
+            // ── Skip finished / cancelled / postponed matches ─────────────────
+            // These are useless for predictions and caused PENDING cards on the front page.
+            $skip_statuses = [ 'FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO', 'PST' ];
+            if ( in_array( $status_short, $skip_statuses, true ) ) continue;
 
-            // Live status
+            // ── Parse match time in WAT (Africa/Lagos) ────────────────────────
+            // API-Football sends ISO 8601 UTC timestamps; we convert to WAT for display.
+            $match_dt = new DateTime( $match_date );       // Parse as UTC
+            $match_dt->setTimezone( $tz );                 // Convert to Africa/Lagos (WAT = UTC+1)
+            $today_wat = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+
+            // Live status — keep a human-readable LIVE string
             $live_statuses = array( '1H', '2H', 'HT', 'ET', 'P', 'LIVE', 'BT' );
-            if ( in_array( $status_short, $live_statuses ) ) {
+            if ( in_array( $status_short, $live_statuses, true ) ) {
                 $elapsed = isset($fixture['fixture']['status']['elapsed']) ? $fixture['fixture']['status']['elapsed'] : '';
                 $time_display = 'LIVE ' . $elapsed . "'";
-            } elseif ( in_array( $status_short, array( 'FT', 'AET', 'PEN' ) ) ) {
-                $time_display = 'FT';
+            } else {
+                // Not started — store clean 24-hr WAT time (e.g. "20:45")
+                $time_display = $match_dt->format( 'H:i' );
             }
+
+            // Use WAT date for match_date meta (not raw UTC date from the API string)
+            $match_date_wat = $match_dt->format( 'Y-m-d' );
 
             // Teams
             $home_name = isset($fixture['teams']['home']['name']) ? $fixture['teams']['home']['name'] : 'Home';
@@ -401,17 +412,11 @@ class Crane_Prediction_API_Service {
             // League
             $league = isset($fixture['league']['name']) ? $fixture['league']['name'] : 'Unknown League';
 
-            // Goals (for live/finished matches)
-            $home_goals = isset($fixture['goals']['home']) ? $fixture['goals']['home'] : null;
-            $away_goals = isset($fixture['goals']['away']) ? $fixture['goals']['away'] : null;
-            if ( $home_goals !== null && $away_goals !== null && in_array( $status_short, array_merge( $live_statuses, array( 'FT', 'AET', 'PEN' ) ) ) ) {
-                $time_display .= ' (' . $home_goals . '-' . $away_goals . ')';
-            }
-
             // Odds (use defaults if not available from this endpoint)
             $odd1 = '—';
             $oddX = '—';
             $odd2 = '—';
+
 
             if ( isset( $existing_fixtures[ $fixture_id ] ) ) {
                 // UPDATE existing post
@@ -445,7 +450,7 @@ class Crane_Prediction_API_Service {
             update_post_meta( $post_id, 'match_oddX', $oddX );
             update_post_meta( $post_id, 'match_odd2', $odd2 );
             update_post_meta( $post_id, 'match_status', $status_short );
-            update_post_meta( $post_id, 'match_date', $today );
+            update_post_meta( $post_id, 'match_date', $match_date_wat );
 
             // NEW: Fetch and Store Real API Prediction (Hardened)
             $existing_tip = get_post_meta( $post_id, '_crane_free_tip', true );
@@ -547,24 +552,30 @@ class Crane_Prediction_API_Service {
      * Runs daily to keep the homepage fresh
      */
     public static function cleanup_old_predictions() {
-        $tz = new DateTimeZone( 'Africa/Lagos' );
-        $cutoff = ( new DateTime( '-2 days', $tz ) )->format( 'Y-m-d' );
+        $tz    = new DateTimeZone( 'Africa/Lagos' );
+        $today = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
 
         $old_posts = new WP_Query( array(
-            'post_type'   => 'crane_prediction',
-            'meta_key'    => 'match_date',
-            'meta_value'  => $cutoff,
-            'meta_compare' => '<',
-            'posts_per_page' => 500, // execution timeout block offset
-            'fields'      => 'ids',
+            'post_type'      => 'crane_prediction',
+            'meta_key'       => 'match_date',
+            'meta_value'     => $today,
+            'meta_compare'   => '<',
+            'meta_type'      => 'DATE',
+            'posts_per_page' => 500,
+            'fields'         => 'ids',
+            'post_status'    => 'any',
         ) );
 
+        $deleted = 0;
         foreach ( $old_posts->posts as $pid ) {
             wp_delete_post( $pid, true );
+            $deleted++;
         }
         wp_reset_postdata();
 
-        error_log( 'Crane Cleanup: Removed predictions older than ' . $cutoff );
+        if ( $deleted > 0 ) {
+            error_log( "Crane API Cleanup: Removed {$deleted} predictions with match_date before {$today} WAT." );
+        }
     }
 
     /**

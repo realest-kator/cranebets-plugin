@@ -146,22 +146,30 @@ class Crane_Free_Prediction_Scraper {
         self::cleanup_old_predictions();
 
         $source = get_option( 'crane_prediction_source', 'forebet_odds' );
-        $imported = 0;
+        $forebet_imported = 0;
+        $odds_imported    = 0;
 
         if ( in_array( $source, [ 'forebet', 'forebet_odds', 'all' ], true ) ) {
-            $imported += self::scrape_forebet();
+            $forebet_imported = self::scrape_forebet();
         }
 
         if ( in_array( $source, [ 'odds_api', 'forebet_odds', 'all' ], true ) ) {
-            $imported += self::fetch_odds_api();
+            $odds_imported = self::fetch_odds_api();
         }
 
-        // Invalidate the front-page matches transient so fresh data is shown immediately
+        $total = $forebet_imported + $odds_imported;
+
+        // Invalidate both transients so fresh data shows immediately
         delete_transient( 'crane_front_matches_html' );
         delete_transient( 'crane_front_locker_preview' );
+        delete_transient( 'crane_front_matches_pool' ); // Load More pool
 
-        error_log( "Crane Free Scraper: Total {$imported} predictions imported." );
-        return $imported;
+        error_log( "Crane Free Scraper: Total {$total} predictions imported (Forebet: {$forebet_imported}, Odds API: {$odds_imported})." );
+        return [
+            'total'   => $total,
+            'forebet' => $forebet_imported,
+            'odds'    => $odds_imported,
+        ];
     }
 
     /**
@@ -1178,9 +1186,25 @@ class Crane_Free_Prediction_Scraper {
         delete_transient( 'crane_forebet_last_run' );
         delete_transient( 'crane_oddsapi_last_run' );
 
-        $imported = self::run();
+        $result = self::run();
 
-        wp_redirect( admin_url( 'admin.php?page=crane-api-settings&free_imported=' . $imported ) );
+        // Support both old (int) and new (array) return formats for backward compat
+        if ( is_array( $result ) ) {
+            $total   = $result['total'];
+            $forebet = $result['forebet'];
+            $odds    = $result['odds'];
+        } else {
+            $total   = (int) $result;
+            $forebet = 0;
+            $odds    = 0;
+        }
+
+        $redirect = admin_url( 'admin.php?page=crane-api-settings'
+            . '&free_imported='  . $total
+            . '&forebet_count='  . $forebet
+            . '&odds_count='     . $odds
+        );
+        wp_redirect( $redirect );
         exit;
     }
 }

@@ -2,7 +2,7 @@
 /*
 Plugin Name: Crane Bets Core
 Description: Backbone functionality for Crane bets Theme (VIP Timer, Accuracy, API Sync, Demo Tools).
-Version: 1.1
+Version: 1.1.0
 Author: Ashiekaa Elijah
 Author URI: https://kator.vercel.app/
 
@@ -1072,8 +1072,29 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                     echo esc_html( $src_labels[$curr_src] ?? $curr_src );
                 ?></strong></p>
                 <p>The Odds API Key status: <strong><?php echo get_option('crane_odds_api_key') ? 'Set' : 'Not set'; ?></strong></p>
-                <?php if ( isset( $_GET['free_imported'] ) ) : ?>
-                    <div class="notice notice-success inline"><p>Scraped & imported <?php echo intval($_GET['free_imported']); ?> predictions successfully!</p></div>
+                <?php if ( isset( $_GET['free_imported'] ) ) : 
+                    $total_imp    = intval( $_GET['free_imported'] );
+                    $forebet_imp  = intval( $_GET['forebet_count'] ?? 0 );
+                    $odds_imp     = intval( $_GET['odds_count'] ?? 0 );
+                    $apif_imp     = intval( $_GET['apif_count'] ?? 0 );
+                ?>
+                    <div class="notice notice-success inline" style="padding: 12px 16px;">
+                        <p style="margin:0 0 6px;"><strong>✅ <?php echo $total_imp; ?> predictions imported successfully.</strong></p>
+                        <ul style="margin:4px 0 0 16px; list-style:disc; font-size:12px; color:#1d2327;">
+                            <?php if ( $forebet_imp > 0 ) : ?>
+                                <li>📊 <strong>Forebet</strong> (mathematical predictions): <?php echo $forebet_imp; ?></li>
+                            <?php endif; ?>
+                            <?php if ( $odds_imp > 0 ) : ?>
+                                <li>📈 <strong>The Odds API</strong> (bookmaker odds): <?php echo $odds_imp; ?></li>
+                            <?php endif; ?>
+                            <?php if ( $apif_imp > 0 ) : ?>
+                                <li>⚡ <strong>API-Football</strong> (live fixtures): <?php echo $apif_imp; ?></li>
+                            <?php endif; ?>
+                            <?php if ( $forebet_imp === 0 && $odds_imp === 0 && $apif_imp === 0 ) : ?>
+                                <li>Source details unavailable (all cached or skipped).</li>
+                            <?php endif; ?>
+                        </ul>
+                    </div>
                 <?php endif; ?>
                 <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
                     <input type="hidden" name="action" value="crane_manual_scraper_fetch">
@@ -1432,6 +1453,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         // Clear front-page transients so stale HTML is gone immediately
         delete_transient( 'crane_front_matches_html' );
         delete_transient( 'crane_front_locker_preview' );
+        delete_transient( 'crane_front_matches_pool' );
 
         wp_redirect( admin_url( 'admin.php?page=crane-api-settings&old_preds_purged=1&purged_count=' . intval( $deleted ) ) );
         exit;
