@@ -2,7 +2,7 @@
 /*
 Plugin Name: Crane Bets Core
 Description: Backbone functionality for Crane bets Theme (VIP Timer, Accuracy, API Sync, Demo Tools).
-Version: 1.1.0
+Version: 1.1.1
 Author: Ashiekaa Elijah
 Author URI: https://kator.vercel.app/
 
