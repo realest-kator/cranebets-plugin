@@ -29,21 +29,38 @@ class Crane_Free_Prediction_Scraper {
         self::run();
     }
 
-    /** Forebet today URL */
-    const FOREBET_TODAY   = 'https://www.forebet.com/en/football-tips-and-predictions-for-today';
-    const FOREBET_AFRICA  = 'https://www.forebet.com/en/football/africa-predictions-statistics';
+    /** Forebet page URLs */
+    const FOREBET_TODAY         = 'https://www.forebet.com/en/football-tips-and-predictions-for-today';
+    const FOREBET_AFRICA        = 'https://www.forebet.com/en/football/africa-predictions-statistics';
+    const FOREBET_INTERNATIONAL = 'https://www.forebet.com/en/football/international-predictions';
+    const FOREBET_WORLD_CUP     = 'https://www.forebet.com/en/football-tips-and-predictions-for-today/world-cup';
 
     /** The Odds API base */
     const ODDS_API_BASE   = 'https://api.the-odds-api.com/v4/sports';
 
     /**
-     * European league priority list (used for filtering/sorting)
+     * Top-tier league / tournament priority list (used for filtering/sorting)
+     * Includes international tournaments so they are never downgraded to "other".
      */
     private static $european_leagues = [
+        // International tournaments — highest priority
+        'world cup', 'fifa world cup', 'wc 2026', 'world cup 2026',
+        'uefa nations league', 'nations league',
+        'copa america', 'copa américa',
+        'concacaf gold cup', 'gold cup',
+        'euro 2024', 'euro 2028', 'european championship',
+        'afcon', 'africa cup', 'caf',
+        // Top European club leagues
         'premier league', 'championship', 'la liga', 'bundesliga', 'serie a',
         'ligue 1', 'eredivisie', 'liga portugal', 'primeira liga',
+        'scottish premiership', 'league one', 'league two',
+        'allsvenskan', 'eliteserien', 'süper lig',
+        // Club cups
         'champions league', 'europa league', 'conference league',
-        'uefa champions league', 'uefa europa league',
+        'uefa champions league', 'uefa europa league', 'uefa conference league',
+        'copa libertadores', 'copa sudamericana',
+        // Middle East / Asia premium
+        'saudi pro league', 'saudi premiere league',
     ];
 
     /**
@@ -55,26 +72,52 @@ class Crane_Free_Prediction_Scraper {
     ];
 
     /**
-     * The Odds API soccer sport keys to query
+     * The Odds API soccer sport keys to query.
+     * International tournaments are listed first so they consume quota before
+     * lower-priority club leagues when the 8-sport-call cap is hit.
      */
     private static $odds_sport_keys = [
+        // ★ International Tournaments — always top priority
+        'soccer_fifa_world_cup',                    // FIFA World Cup 2026
+        'soccer_uefa_nations_league',               // UEFA Nations League
+        'soccer_conmebol_copa_america',             // Copa América
+        'soccer_concacaf_gold_cup',                 // CONCACAF Gold Cup
+
+        // Top 5 European Leagues
         'soccer_epl',
         'soccer_spain_la_liga',
         'soccer_germany_bundesliga',
         'soccer_italy_serie_a',
         'soccer_france_ligue_one',
+
+        // European Club Cups
         'soccer_uefa_champs_league',
         'soccer_uefa_europa_league',
+        'soccer_uefa_europa_conference_league',
+
+        // Other European Leagues
         'soccer_netherlands_eredivisie',
         'soccer_portugal_primeira_liga',
-        'soccer_nigeria_npfl',
-        'soccer_africa_caf_champions_league',
-        'soccer_brazil_campeonato',
-        'soccer_usa_mls',
-        'soccer_argentina_primera_division',
+        'soccer_england_league1',
         'soccer_turkey_super_league',
         'soccer_greece_super_league',
+        'soccer_sweden_allsvenskan',
+        'soccer_norway_eliteserien',
+
+        // Americas
+        'soccer_usa_mls',
+        'soccer_brazil_campeonato',
+        'soccer_argentina_primera_division',
+        'soccer_conmebol_copa_libertadores',
+
+        // Middle East
         'soccer_saudi_arabio_premiere_league',
+
+        // Africa
+        'soccer_nigeria_npfl',
+        'soccer_africa_caf_champions_league',
+        'soccer_south_africa_premier_division',
+        'soccer_ghana_premier_league',
     ];
 
     /**
@@ -85,7 +128,7 @@ class Crane_Free_Prediction_Scraper {
             'User-Agent'      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept'          => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language' => 'en-US,en;q=0.9',
-            'Accept-Encoding' => 'gzip, deflate, br',
+            'Accept-Encoding' => 'gzip, deflate',
             'Cache-Control'   => 'no-cache',
             'Referer'         => 'https://www.google.com/',
         ];
@@ -179,7 +222,8 @@ class Crane_Free_Prediction_Scraper {
     // =========================================================================
 
     /**
-     * Scrape Forebet today page (with Africa fallback when EU off-season)
+     * Scrape Forebet today page, plus international/World Cup pages when active.
+     * Falls back to African leagues when EU is genuinely off-season.
      */
     public static function scrape_forebet() {
         // Check transient — only scrape if not done in last 6 hours
@@ -196,21 +240,55 @@ class Crane_Free_Prediction_Scraper {
 
         $matches = self::parse_forebet_html( $html );
 
-        // Separate European from non-European
-        $european = [];
+        // ── International / World Cup page fetch ──────────────────────────────
+        // Always attempt the international predictions page when a major
+        // tournament is active (World Cup, Euros, Copa América, etc.).
+        if ( self::is_major_tournament_active() ) {
+            error_log( 'Crane Forebet: Major tournament active — fetching international predictions page.' );
+
+            $intl_html = self::fetch_url( self::FOREBET_INTERNATIONAL );
+            if ( $intl_html ) {
+                $intl_matches = self::parse_forebet_html( $intl_html );
+                $matches      = array_merge( $matches, $intl_matches );
+                error_log( 'Crane Forebet: International page added ' . count( $intl_matches ) . ' matches.' );
+            }
+
+            // Also try the dedicated World Cup predictions page
+            $wc_html = self::fetch_url( self::FOREBET_WORLD_CUP );
+            if ( $wc_html ) {
+                $wc_matches = self::parse_forebet_html( $wc_html );
+                $matches    = array_merge( $matches, $wc_matches );
+                error_log( 'Crane Forebet: World Cup page added ' . count( $wc_matches ) . ' matches.' );
+            }
+        }
+
+        // ── Separate priority (EU/International) from other ───────────────────
+        $priority = [];
         $other    = [];
         foreach ( $matches as $m ) {
             if ( self::is_european_league( $m['league'] ) ) {
-                $european[] = $m;
+                $priority[] = $m;
             } else {
                 $other[] = $m;
             }
         }
 
-        // If EU off-season OR no EU matches found → fetch African leagues
-        $to_store = $european;
-        if ( empty( $european ) || self::is_off_season() ) {
-            error_log( 'Crane Forebet: EU off-season or no EU matches — fetching African leagues.' );
+        // Deduplicate by home+away pair (cross-page duplicates)
+        $seen      = [];
+        $deduped   = [];
+        $all_found = array_merge( $priority, $other );
+        foreach ( $all_found as $m ) {
+            $key = strtolower( $m['home'] . '|' . $m['away'] );
+            if ( ! isset( $seen[ $key ] ) ) {
+                $seen[ $key ] = true;
+                $deduped[]    = $m;
+            }
+        }
+
+        // ── Off-season fallback ───────────────────────────────────────────────
+        $to_store = $priority;
+        if ( empty( $priority ) || self::is_off_season() ) {
+            error_log( 'Crane Forebet: EU off-season or no priority matches — fetching African leagues.' );
             $africa_html = self::fetch_url( self::FOREBET_AFRICA );
             if ( $africa_html ) {
                 $africa_matches = self::parse_forebet_html( $africa_html );
@@ -222,13 +300,15 @@ class Crane_Free_Prediction_Scraper {
                 } );
                 $to_store = array_merge( $to_store, $africa_matches );
             } else {
-                // Fall back to non-EU from today page
-                $to_store = array_merge( $to_store, $other );
+                $to_store = $deduped; // use everything we found
             }
+        } else {
+            $to_store = $deduped; // include all deduped matches (priority first)
         }
 
-        // Limit to 20 predictions per run
-        $to_store = array_slice( $to_store, 0, 20 );
+        // Raise cap to 40 during major tournaments, 20 otherwise
+        $cap      = self::is_major_tournament_active() ? 40 : 20;
+        $to_store = array_slice( $to_store, 0, $cap );
 
         $imported = 0;
         foreach ( $to_store as $match_data ) {
@@ -239,7 +319,7 @@ class Crane_Free_Prediction_Scraper {
 
         // Cache for 6 hours so we don't hammer Forebet
         set_transient( 'crane_forebet_last_run', true, 6 * HOUR_IN_SECONDS );
-        error_log( "Crane Forebet: Imported {$imported} predictions." );
+        error_log( "Crane Forebet: Imported {$imported} predictions (cap={$cap})." );
         return $imported;
     }
 
@@ -253,8 +333,8 @@ class Crane_Free_Prediction_Scraper {
         if ( empty( $html ) ) return [];
         $matches = [];
 
-        // --- Strategy 1: Find div.rcnt rows (known Forebet class) ---
-        if ( preg_match_all( '/<div[^>]*class=["\'][^"\']*\brcnt\b[^"\']*["\'][^>]*>(.*?)<\/div>\s*<\/div>/is', $html, $rows ) ) {
+        // --- Strategy 1: Find div.rcnt rows (known Forebet class) using lookahead ---
+        if ( preg_match_all( '/(<div[^>]*class=["\'][^"\']*\brcnt\b[^"\']*["\'][^>]*>.*?)(?=<div[^>]*class=["\'][^"\']*\brcnt\b[^"\']*["\']|<!--|<section|<\/body>|$)/is', $html, $rows ) ) {
             foreach ( $rows[1] as $row_html ) {
                 $m = self::extract_match_from_row( $row_html );
                 if ( $m ) $matches[] = $m;
@@ -273,7 +353,7 @@ class Crane_Free_Prediction_Scraper {
 
         // --- Strategy 3: JSON-LD or embedded JSON data ---
         if ( empty( $matches ) ) {
-            if ( preg_match_all( '/<script[^>]*type=["\']application\/ld\+json["\'][^>]*>(.*?)<\/script>/is', $html, $json_blocks ) ) {
+            if ( preg_match_all( '/<script[^>]*type=["\']application\/ld\+json["\'][^]*>(.*?)<\/script>/is', $html, $json_blocks ) ) {
                 foreach ( $json_blocks[1] as $block ) {
                     $data = json_decode( trim( $block ), true );
                     if ( is_array( $data ) && isset( $data['name'] ) && isset( $data['homeTeam'] ) ) {
@@ -287,10 +367,29 @@ class Crane_Free_Prediction_Scraper {
                             'draw_prob'  => '30%',
                             'away_prob'  => '25%',
                             'score'      => '',
+                            'short_tag'  => '',
                         ];
                     }
                 }
             }
+        }
+
+        // Two-pass resolution: resolve empty/generic leagues using short_tag mapping
+        $tag_to_league = [];
+        foreach ( $matches as $m ) {
+            if ( ! empty( $m['short_tag'] ) && ! empty( $m['league'] ) && $m['league'] !== 'Football' ) {
+                $tag_to_league[ $m['short_tag'] ] = $m['league'];
+            }
+        }
+        foreach ( $matches as $k => $m ) {
+            if ( ( empty( $m['league'] ) || $m['league'] === 'Football' ) && ! empty( $m['short_tag'] ) ) {
+                if ( isset( $tag_to_league[ $m['short_tag'] ] ) ) {
+                    $matches[$k]['league'] = $tag_to_league[ $m['short_tag'] ];
+                } elseif ( strtolower($m['short_tag']) === 'us4' ) {
+                    $matches[$k]['league'] = 'USA - USL League Two';
+                }
+            }
+            unset( $matches[$k]['short_tag'] );
         }
 
         error_log( 'Crane Forebet Parser: Found ' . count( $matches ) . ' matches.' );
@@ -303,18 +402,14 @@ class Crane_Free_Prediction_Scraper {
     private static function extract_match_from_row( $row_html ) {
         // Home team
         $home = '';
-        if ( preg_match( '/<span[^>]*class=["\'][^"\']*homeTeam[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $home = trim( strip_tags( $m[1] ) );
-        } elseif ( preg_match( '/<span[^>]*class=["\'][^"\']*home[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $home = trim( strip_tags( $m[1] ) );
+        if ( preg_match( '/<span[^>]*class=["\']*(?:homeTeam|home)[^"\']*["\'][^>]*>(?:<span[^>]* itemprop="name"[^>]*>)?(.*?)(?:<\/span>){1,2}/is', $row_html, $hp ) ) {
+            $home = trim( strip_tags( $hp[1] ) );
         }
 
         // Away team
         $away = '';
-        if ( preg_match( '/<span[^>]*class=["\'][^"\']*awayTeam[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $away = trim( strip_tags( $m[1] ) );
-        } elseif ( preg_match( '/<span[^>]*class=["\'][^"\']*away[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $away = trim( strip_tags( $m[1] ) );
+        if ( preg_match( '/<span[^>]*class=["\']*(?:awayTeam|away)[^"\']*["\'][^>]*>(?:<span[^>]* itemprop="name"[^>]*>)?(.*?)(?:<\/span>){1,2}/is', $row_html, $ap ) ) {
+            $away = trim( strip_tags( $ap[1] ) );
         }
 
         if ( empty( $home ) || empty( $away ) ) return null;
@@ -329,17 +424,40 @@ class Crane_Free_Prediction_Scraper {
         }
 
         // Convert from GMT to WAT (West Africa Time = UTC+1)
-        if ( ! empty( $time ) && preg_match( '/^(\d{2}):(\d{2})$/', $time, $tp ) ) {
-            $hour = ( intval( $tp[1] ) + 1 ) % 24;
-            $time = sprintf( '%02d:%02d', $hour, intval( $tp[2] ) );
+        if ( ! empty( $time ) ) {
+            // Extract time part if date is also present (e.g. "09/06/2026 19:30")
+            if ( strpos( $time, ' ' ) !== false ) {
+                $parts = explode( ' ', $time );
+                $time_part = end( $parts );
+            } else {
+                $time_part = $time;
+            }
+            if ( preg_match( '/^(\d{2}):(\d{2})$/', $time_part, $tp ) ) {
+                $hour = ( intval( $tp[1] ) + 1 ) % 24;
+                $time = sprintf( '%02d:%02d', $hour, intval( $tp[2] ) );
+            }
         }
 
-        // League
+        // League — build "Country - League" from getstag() onclick to avoid ambiguous names
+        // getstag(this, matchId, 'Country', 'League Name', 'url-slug', 'cc')
         $league = 'Football';
-        if ( preg_match( '/<span[^>]*class=["\'][^"\']*country_league[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
+        if ( preg_match( "/onclick=[\"']getstag\\([^,]*,\\s*[^,]*,\\s*'([^']*)',\\s*'([^']*)'/is", $row_html, $lp ) ) {
+            $country   = trim( $lp[1] );
+            $lge_name  = trim( $lp[2] );
+            if ( ! empty( $lge_name ) ) {
+                // Combine country + league for disambiguation (e.g. 'Canada - Premier League')
+                $league = ! empty( $country ) ? $country . ' - ' . $lge_name : $lge_name;
+            }
+        } elseif ( preg_match( '/<span[^>]*class=["\'][^"\']*country_league[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
             $league = trim( strip_tags( $m[1] ) );
         } elseif ( preg_match( '/<span[^>]*class=["\'][^"\']*league[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
             $league = trim( strip_tags( $m[1] ) );
+        }
+
+        // short_tag extraction
+        $short_tag = '';
+        if ( preg_match( '/<span[^>]*class=["\']shortTag["\'][^>]*>(.*?)<\/span>/is', $row_html, $st_match ) ) {
+            $short_tag = trim( strip_tags( $st_match[1] ) );
         }
 
         // Prediction (1, X, or 2)
@@ -355,16 +473,36 @@ class Crane_Free_Prediction_Scraper {
         $home_prob = '';
         $draw_prob = '';
         $away_prob = '';
-        if ( preg_match_all( '/<div[^>]*class=["\'][^"\']*predict[^"\']*["\'][^>]*>(\d+)<\/div>/is', $row_html, $pm ) ) {
+        if ( preg_match( '/<div[^>]*class=["\']fprc["\'][^>]*>(.*?)<\/div>/is', $row_html, $fprc_block ) ) {
+            if ( preg_match_all( '/<span>(\d+)<\/span>|<span[^>]*class=["\']fpr["\'][^>]*>(\d+)<\/span>/is', $fprc_block[1], $pm ) ) {
+                $probs = [];
+                foreach ( $pm[0] as $match_val ) {
+                    $probs[] = trim( strip_tags( $match_val ) );
+                }
+                if ( isset( $probs[0] ) ) $home_prob = $probs[0] . '%';
+                if ( isset( $probs[1] ) ) $draw_prob = $probs[1] . '%';
+                if ( isset( $probs[2] ) ) $away_prob = $probs[2] . '%';
+            }
+        }
+
+        // Fallback to old behavior
+        if ( empty( $home_prob ) && preg_match_all( '/<div[^>]*class=["\'][^"\']*predict[^"\']*["\'][^>]*>(\d+)<\/div>/is', $row_html, $pm ) ) {
             if ( isset( $pm[1][0] ) ) $home_prob = $pm[1][0] . '%';
             if ( isset( $pm[1][1] ) ) $draw_prob = $pm[1][1] . '%';
             if ( isset( $pm[1][2] ) ) $away_prob = $pm[1][2] . '%';
         }
 
-        // Predicted correct score
+        // Predicted correct score — match ALL ex_sc elements, pick the one that looks like '## - ##'
         $score = '';
-        if ( preg_match( '/<span[^>]*class=["\'][^"\']*ex_sc[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $score = trim( strip_tags( $m[1] ) );
+        if ( preg_match_all( '/<(?:div|span)[^>]*class=["\'][^"\']*ex_sc[^"\']*["\'][^>]*>(.*?)<\/(?:div|span)>/is', $row_html, $sc_all ) ) {
+            foreach ( $sc_all[1] as $sc_raw ) {
+                $sc_clean = trim( strip_tags( $sc_raw ) );
+                // Only accept format like '1 - 0' or '2 - 2' (with spaces around dash)
+                if ( preg_match( '/^\d+\s+-\s+\d+$/', $sc_clean ) ) {
+                    $score = $sc_clean;
+                    break;
+                }
+            }
         }
 
         return [
@@ -377,6 +515,7 @@ class Crane_Free_Prediction_Scraper {
             'draw_prob'  => $draw_prob,
             'away_prob'  => $away_prob,
             'score'      => $score,
+            'short_tag'  => sanitize_text_field( $short_tag ),
         ];
     }
 
@@ -401,21 +540,25 @@ class Crane_Free_Prediction_Scraper {
         }
 
         $is_off_season = self::is_off_season();
-        $sport_keys = self::$odds_sport_keys;
+        $sport_keys    = self::$odds_sport_keys;
 
-        // In off-season, prioritise African leagues
-        if ( $is_off_season ) {
-            // Move African keys to front
-            $african = [ 'soccer_nigeria_npfl', 'soccer_africa_caf_champions_league' ];
-            $european = array_diff( $sport_keys, $african );
-            $sport_keys = array_merge( $african, $european );
+        // In true off-season (no major tournament), prioritise African leagues
+        // International tournament keys are already at the top of the array,
+        // so we only need to reshuffle when genuine off-season AND no tournament.
+        if ( $is_off_season && ! self::is_major_tournament_active() ) {
+            $african    = [ 'soccer_nigeria_npfl', 'soccer_africa_caf_champions_league', 'soccer_south_africa_premier_division', 'soccer_ghana_premier_league' ];
+            $rest       = array_diff( $sport_keys, $african );
+            $sport_keys = array_merge( $african, $rest );
         }
 
         $imported  = 0;
         $processed = 0;
 
+        // Raise the per-run sport call cap during major tournaments
+        $sport_call_cap = self::is_major_tournament_active() ? 12 : 8;
+
         foreach ( $sport_keys as $sport_key ) {
-            if ( $processed >= 8 ) break; // Limit API credit usage (max 8 sport calls)
+            if ( $processed >= $sport_call_cap ) break; // Limit API credit usage
 
             $url = self::ODDS_API_BASE . "/{$sport_key}/odds/?" . http_build_query( [
                 'apiKey'   => $api_key,
@@ -710,17 +853,41 @@ class Crane_Free_Prediction_Scraper {
      */
     private static function sport_key_to_league( $key ) {
         $map = [
-            'soccer_epl'                      => 'Premier League',
-            'soccer_spain_la_liga'            => 'La Liga',
-            'soccer_germany_bundesliga'       => 'Bundesliga',
-            'soccer_italy_serie_a'            => 'Serie A',
-            'soccer_france_ligue_one'         => 'Ligue 1',
-            'soccer_uefa_champs_league'       => 'UEFA Champions League',
-            'soccer_uefa_europa_league'       => 'UEFA Europa League',
-            'soccer_netherlands_eredivisie'   => 'Eredivisie',
-            'soccer_portugal_primeira_liga'   => 'Liga Portugal',
-            'soccer_nigeria_npfl'             => 'NPFL',
-            'soccer_africa_caf_champions_league' => 'CAF Champions League',
+            // International Tournaments
+            'soccer_fifa_world_cup'                    => 'FIFA World Cup 2026',
+            'soccer_uefa_nations_league'               => 'UEFA Nations League',
+            'soccer_conmebol_copa_america'             => 'Copa América',
+            'soccer_concacaf_gold_cup'                 => 'CONCACAF Gold Cup',
+            // Top European Club Leagues
+            'soccer_epl'                               => 'Premier League',
+            'soccer_spain_la_liga'                     => 'La Liga',
+            'soccer_germany_bundesliga'                => 'Bundesliga',
+            'soccer_italy_serie_a'                     => 'Serie A',
+            'soccer_france_ligue_one'                  => 'Ligue 1',
+            // European Club Cups
+            'soccer_uefa_champs_league'                => 'UEFA Champions League',
+            'soccer_uefa_europa_league'                => 'UEFA Europa League',
+            'soccer_uefa_europa_conference_league'     => 'UEFA Conference League',
+            // Other European
+            'soccer_netherlands_eredivisie'            => 'Eredivisie',
+            'soccer_portugal_primeira_liga'            => 'Liga Portugal',
+            'soccer_england_league1'                   => 'EFL League One',
+            'soccer_turkey_super_league'               => 'Süper Lig',
+            'soccer_greece_super_league'               => 'Greek Super League',
+            'soccer_sweden_allsvenskan'                => 'Allsvenskan',
+            'soccer_norway_eliteserien'                => 'Eliteserien',
+            // Americas
+            'soccer_usa_mls'                           => 'MLS',
+            'soccer_brazil_campeonato'                 => 'Brasileirão',
+            'soccer_argentina_primera_division'        => 'Primera División',
+            'soccer_conmebol_copa_libertadores'        => 'Copa Libertadores',
+            // Middle East
+            'soccer_saudi_arabio_premiere_league'      => 'Saudi Pro League',
+            // Africa
+            'soccer_nigeria_npfl'                      => 'NPFL',
+            'soccer_africa_caf_champions_league'       => 'CAF Champions League',
+            'soccer_south_africa_premier_division'     => 'South Africa PSL',
+            'soccer_ghana_premier_league'              => 'Ghana Premier League',
         ];
         return $map[ $key ] ?? ucwords( str_replace( [ 'soccer_', '_' ], [ '', ' ' ], $key ) );
     }
@@ -737,10 +904,21 @@ class Crane_Free_Prediction_Scraper {
     }
 
     /**
-     * Detect European off-season:
-     * - Most leagues end mid-May (Champions League final is ~late May).
-     * - New seasons start mid-August.
-     * - Off-season window: May 16 – August 14.
+     * Public wrapper for is_off_season() — used by the admin panel in crane-bets-core.php.
+     */
+    public static function is_off_season_public() {
+        return self::is_off_season();
+    }
+
+    /**
+     * Detect whether European CLUB leagues are in off-season.
+     *
+     * IMPORTANT: This does NOT mean no football is happening. International
+     * tournaments (World Cup, Euros, Copa América, Nations League) run precisely
+     * during the club off-season. Always check is_major_tournament_active()
+     * alongside this method before suppressing predictions.
+     *
+     * Off-season window: May 16 – August 14 (club leagues only).
      */
     private static function is_off_season() {
         $tz    = new DateTimeZone( 'Africa/Lagos' );
@@ -748,12 +926,67 @@ class Crane_Free_Prediction_Scraper {
         $month = (int) $now->format( 'n' );
         $day   = (int) $now->format( 'j' );
 
-        // June and July are always off-season
-        if ( $month === 6 || $month === 7 ) return true;
-        // Second half of May (after Champions League final week)
+        // Second half of May (after Champions League final)
         if ( $month === 5 && $day >= 16 ) return true;
-        // First half of August (before new seasons begin)
+        // June and July — club off-season, BUT major tournaments run here
+        if ( $month === 6 || $month === 7 ) return true;
+        // First half of August (before new club seasons begin)
         if ( $month === 8 && $day <= 14 ) return true;
+
+        return false;
+    }
+
+    /**
+     * Detect whether a major international football tournament is currently active.
+     *
+     * Tournaments covered:
+     *  - FIFA World Cup (quadrennial, June–July: 2026, 2030, 2034 …)
+     *  - UEFA European Championship (quadrennial, June–July: 2024, 2028, 2032 …)
+     *  - Copa América (held irregularly in June–July)
+     *  - CONCACAF Gold Cup (odd years, June–July)
+     *  - UEFA Nations League Finals (June, even years)
+     *
+     * Returns true if a major tournament is expected to be running right now.
+     */
+    public static function is_major_tournament_active() {
+        $tz    = new DateTimeZone( 'Africa/Lagos' );
+        $now   = new DateTime( 'now', $tz );
+        $month = (int) $now->format( 'n' );
+        $day   = (int) $now->format( 'j' );
+        $year  = (int) $now->format( 'Y' );
+
+        // FIFA World Cup: runs ~June 11 – July 19 every 4 years starting 2026
+        $wc_years = [ 2026, 2030, 2034, 2038 ];
+        if ( in_array( $year, $wc_years, true ) ) {
+            if ( $month === 6 && $day >= 11 ) return true;
+            if ( $month === 7 && $day <= 19 ) return true;
+        }
+
+        // UEFA European Championship: runs ~June 14 – July 14 every 4 years
+        // 2024 was last; 2028 is next
+        $euro_years = [ 2024, 2028, 2032, 2036 ];
+        if ( in_array( $year, $euro_years, true ) ) {
+            if ( $month === 6 && $day >= 14 ) return true;
+            if ( $month === 7 && $day <= 14 ) return true;
+        }
+
+        // Copa América: approximately June–July, tends to run in non-WC years
+        // We broadly cover June 15 – July 15 for odd-even patterns
+        // (2021, 2024, 2027, 2031 …)
+        $copa_years = [ 2021, 2024, 2027, 2031, 2035 ];
+        if ( in_array( $year, $copa_years, true ) ) {
+            if ( $month === 6 && $day >= 15 ) return true;
+            if ( $month === 7 && $day <= 15 ) return true;
+        }
+
+        // CONCACAF Gold Cup: odd years, roughly June 15 – July 16
+        if ( $year % 2 !== 0 ) {
+            if ( $month === 6 && $day >= 15 ) return true;
+            if ( $month === 7 && $day <= 16 ) return true;
+        }
+
+        // UEFA Nations League Finals: June, even years
+        if ( $year % 2 === 0 && $month === 6 ) return true;
 
         return false;
     }
@@ -762,24 +995,73 @@ class Crane_Free_Prediction_Scraper {
      * Fetch a URL with browser headers and gzip decoding
      */
     private static function fetch_url( $url ) {
-        $response = wp_remote_get( $url, [
-            'timeout' => 20,
-            'headers' => self::browser_headers(),
-            'sslverify' => false,
-        ] );
+        // Try shell_exec with native curl.exe first to bypass Cloudflare WAF / fingerprint blocks
+        if ( function_exists( 'shell_exec' ) && ! in_array( 'shell_exec', array_map( 'trim', explode( ',', ini_get( 'disable_functions' ) ) ), true ) ) {
+            $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+            $cmd = 'curl.exe -s -L -A ' . escapeshellarg( $userAgent ) . ' ' . escapeshellarg( $url );
+            $output = shell_exec( $cmd );
 
-        if ( is_wp_error( $response ) ) {
-            error_log( 'Crane Scraper fetch error: ' . $response->get_error_message() );
+            // Check if we got a valid response (not empty, not containing 403/Cloudflare challenge)
+            if ( ! empty( $output ) && strpos( $output, '403 Forbidden' ) === false && strpos( $output, '<title>Please Wait... | Cloudflare</title>' ) === false ) {
+                return $output;
+            }
+            error_log( "Crane Scraper: shell_exec curl.exe failed or returned block page for {$url}. Falling back to PHP curl." );
+        }
+
+        if ( ! function_exists( 'curl_init' ) ) {
+            $response = wp_remote_get( $url, [
+                'timeout'   => 20,
+                'headers'   => self::browser_headers(),
+                'sslverify' => false,
+            ] );
+
+            if ( is_wp_error( $response ) ) {
+                error_log( 'Crane Scraper fetch error: ' . $response->get_error_message() );
+                return null;
+            }
+
+            $code = wp_remote_retrieve_response_code( $response );
+            if ( $code !== 200 ) {
+                error_log( "Crane Scraper: HTTP {$code} for {$url}" );
+                return null;
+            }
+
+            return wp_remote_retrieve_body( $response );
+        }
+
+        $ch      = curl_init();
+        $headers = [];
+        foreach ( self::browser_headers() as $key => $val ) {
+            $headers[] = "{$key}: {$val}";
+        }
+
+        curl_setopt( $ch, CURLOPT_URL, $url );
+        curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+        curl_setopt( $ch, CURLOPT_TIMEOUT, 20 );
+        curl_setopt( $ch, CURLOPT_SSL_VERIFYPEER, false );
+        curl_setopt( $ch, CURLOPT_SSL_VERIFYHOST, false );
+        curl_setopt( $ch, CURLOPT_HTTPHEADER, $headers );
+        curl_setopt( $ch, CURLOPT_ENCODING, '' ); // Automatically decode gzip/deflate
+        curl_setopt( $ch, CURLOPT_FOLLOWLOCATION, true );
+        curl_setopt( $ch, CURLOPT_MAXREDIRS, 5 );
+        curl_setopt( $ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' );
+
+        $body = curl_exec( $ch );
+        $code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+        $err  = curl_error( $ch );
+        curl_close( $ch );
+
+        if ( $err ) {
+            error_log( "Crane Scraper curl error for {$url}: {$err}" );
             return null;
         }
 
-        $code = wp_remote_retrieve_response_code( $response );
         if ( $code !== 200 ) {
             error_log( "Crane Scraper: HTTP {$code} for {$url}" );
             return null;
         }
 
-        return wp_remote_retrieve_body( $response );
+        return $body;
     }
 
     /**

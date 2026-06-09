@@ -2,7 +2,7 @@
 /*
 Plugin Name: Crane Bets Core
 Description: Backbone functionality for Crane bets Theme (VIP Timer, Accuracy, API Sync, Demo Tools).
-Version: 1.1.0
+Version: 1.1
 Author: Ashiekaa Elijah
 Author URI: https://kator.vercel.app/
 
@@ -242,7 +242,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
      * Covers zip re-uploads where register_activation_hook doesn't fire.
      */
     public function maybe_run_upgrade() {
-        $current_version = '1.0.1';
+        $current_version = '1.1';
         $stored_version  = get_option( 'crane_plugin_version', '0' );
         if ( $stored_version === $current_version ) return;
 
@@ -1097,17 +1097,44 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                     <?php endif; ?>
                 </form>
                 <?php
-                // Show off-season status so admin can see why Africa fallback triggers
-                $tz_os = new DateTimeZone( 'Africa/Lagos' );
-                $now_os = new DateTime( 'now', $tz_os );
-                $m_os = (int) $now_os->format( 'n' );
-                $d_os = (int) $now_os->format( 'j' );
-                $is_os = ( $m_os === 6 || $m_os === 7 ) || ( $m_os === 5 && $d_os >= 16 ) || ( $m_os === 8 && $d_os <= 14 );
+                // Use the scraper's own methods so admin panel always matches runtime behaviour
+                $is_os         = class_exists( 'Crane_Free_Prediction_Scraper' )
+                    ? Crane_Free_Prediction_Scraper::is_off_season_public()
+                    : false;
+                $is_tournament = class_exists( 'Crane_Free_Prediction_Scraper' )
+                    ? Crane_Free_Prediction_Scraper::is_major_tournament_active()
+                    : false;
+
+                // Fallback inline calc if class not yet loaded
+                if ( ! class_exists( 'Crane_Free_Prediction_Scraper' ) ) {
+                    $tz_os = new DateTimeZone( 'Africa/Lagos' );
+                    $now_os = new DateTime( 'now', $tz_os );
+                    $m_os = (int) $now_os->format( 'n' );
+                    $d_os = (int) $now_os->format( 'j' );
+                    $y_os = (int) $now_os->format( 'Y' );
+                    $is_os = ( $m_os === 6 || $m_os === 7 ) || ( $m_os === 5 && $d_os >= 16 ) || ( $m_os === 8 && $d_os <= 14 );
+                    $wc_years = [2026, 2030, 2034, 2038];
+                    $is_tournament = in_array( $y_os, $wc_years, true ) && ( ( $m_os === 6 && $d_os >= 11 ) || ( $m_os === 7 && $d_os <= 19 ) );
+                    $now_os = new DateTime( 'now', $tz_os );
+                }
                 ?>
-                <p style="margin-top:12px; font-size:12px; color:<?php echo $is_os ? '#d63638' : '#00a32a'; ?>;">
-                    <strong>European Season Status:</strong>
-                    <?php echo $is_os ? '&#x1F534; OFF-SEASON — Africa/World fallback leagues will be used.' : '&#x1F7E2; IN SEASON — European leagues are active.'; ?>
-                    (Today: <?php echo esc_html( $now_os->format( 'M j, Y' ) ); ?> WAT)
+                <p style="margin-top:12px; font-size:12px; color:<?php echo $is_os && ! $is_tournament ? '#d63638' : '#00a32a'; ?>;">
+                    <strong>European Club League Status:</strong>
+                    <?php echo $is_os ? '&#x1F534; Club Off-Season' : '&#x1F7E2; Club Leagues Active'; ?>
+                    &nbsp;&mdash;&nbsp;
+                    <?php
+                    $tz_disp = new DateTimeZone( 'Africa/Lagos' );
+                    $now_disp = new DateTime( 'now', $tz_disp );
+                    echo esc_html( $now_disp->format( 'M j, Y' ) ) . ' WAT';
+                    ?>
+                </p>
+                <p style="margin-top:6px; font-size:12px; color:<?php echo $is_tournament ? '#00a32a' : '#888'; ?>;">
+                    <strong>Major Tournament Status:</strong>
+                    <?php if ( $is_tournament ) : ?>
+                        &#x1F3C6; <strong>ACTIVE</strong> &mdash; FIFA World Cup 2026 / International tournament running. Predictions expanded to 40/cycle, international pages fetched.
+                    <?php else : ?>
+                        &#x26AA; No major international tournament currently active.
+                    <?php endif; ?>
                 </p>
             </div>
 

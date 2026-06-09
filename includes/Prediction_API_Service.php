@@ -292,16 +292,61 @@ class Crane_Prediction_API_Service {
         }
 
         // Get today's date in Lagos timezone
-        $tz = new DateTimeZone( 'Africa/Lagos' );
+        $tz    = new DateTimeZone( 'Africa/Lagos' );
         $today = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+        $year  = (int) ( new DateTime( 'now', $tz ) )->format( 'Y' );
 
-        // Fetch fixtures for today
+        // Fetch fixtures for today (general — catches most leagues)
         $fixtures = self::api_request( '/fixtures', array(
             'date'     => $today,
             'timezone' => 'Africa/Lagos',
         ), 120 ); // Cache for 120 minutes
 
         if ( ! $fixtures ) {
+            $fixtures = array();
+        }
+
+        // ── Priority league ID top-up ─────────────────────────────────────────
+        // The global ?date= endpoint is paginated and the free tier may not
+        // return all competitions. We explicitly query high-value league IDs so
+        // World Cup, Nations League and top cups are never silently dropped.
+        //
+        // API-Football league IDs:
+        //   1  = FIFA World Cup          4  = UEFA Euro Championship
+        //   9  = UEFA Nations League    15  = FIFA Club World Cup
+        //   2  = UEFA Champions League   3  = UEFA Europa League
+        //  848 = UEFA Conference League
+        $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
+
+        // Collect existing fixture IDs to avoid duplicates before merging
+        $existing_ids = array();
+        foreach ( $fixtures as $f ) {
+            if ( isset( $f['fixture']['id'] ) ) {
+                $existing_ids[ $f['fixture']['id'] ] = true;
+            }
+        }
+
+        foreach ( $priority_league_ids as $lid ) {
+            $extra = self::api_request( '/fixtures', array(
+                'league'   => $lid,
+                'season'   => $year,
+                'date'     => $today,
+                'timezone' => 'Africa/Lagos',
+            ), 120 );
+
+            if ( is_array( $extra ) && ! empty( $extra ) ) {
+                foreach ( $extra as $ef ) {
+                    $efid = $ef['fixture']['id'] ?? 0;
+                    if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
+                        $fixtures[]              = $ef;
+                        $existing_ids[ $efid ]   = true;
+                    }
+                }
+                error_log( 'Crane API-Football: Merged ' . count( $extra ) . ' fixtures from priority league ID ' . $lid );
+            }
+        }
+
+        if ( empty( $fixtures ) ) {
             error_log( 'Crane Predictions Sync: No fixtures returned for ' . $today );
             return;
         }
