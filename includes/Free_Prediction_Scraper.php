@@ -416,25 +416,47 @@ class Crane_Free_Prediction_Scraper {
         if ( strlen( $home ) > 50 || strlen( $away ) > 50 ) return null; // sanity check
 
         // Time / Date (Forebet shows times in GMT/UTC by default when scraped)
-        $time = '';
+        $time_str = '';
         if ( preg_match( '/<span[^>]*class=["\'][^"\']*date_bah[^"\']*["\'][^>]*>(.*?)<\/span>/is', $row_html, $m ) ) {
-            $time = trim( strip_tags( $m[1] ) );
+            $time_str = trim( strip_tags( $m[1] ) );
         } elseif ( preg_match( '/(\d{2}:\d{2})/', $row_html, $m ) ) {
-            $time = $m[1];
+            $time_str = $m[1];
         }
 
-        // Convert from GMT to WAT (West Africa Time = UTC+1)
-        if ( ! empty( $time ) ) {
-            // Extract time part if date is also present (e.g. "09/06/2026 19:30")
-            if ( strpos( $time, ' ' ) !== false ) {
-                $parts = explode( ' ', $time );
-                $time_part = end( $parts );
-            } else {
-                $time_part = $time;
-            }
-            if ( preg_match( '/^(\d{2}):(\d{2})$/', $time_part, $tp ) ) {
-                $hour = ( intval( $tp[1] ) + 1 ) % 24;
-                $time = sprintf( '%02d:%02d', $hour, intval( $tp[2] ) );
+        $date = '';
+        $time = '';
+        if ( ! empty( $time_str ) ) {
+            if ( preg_match( '/(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})/', $time_str, $dt ) ) {
+                // We have a full datetime string: DD/MM/YYYY HH:MM in GMT
+                $day   = $dt[1];
+                $month = $dt[2];
+                $year  = $dt[3];
+                $hour  = $dt[4];
+                $min   = $dt[5];
+                
+                try {
+                    $utc_dt = new DateTime( "$year-$month-$day $hour:$min", new DateTimeZone( 'UTC' ) );
+                    // Convert to WAT (Africa/Lagos, which is UTC+1)
+                    $utc_dt->setTimezone( new DateTimeZone( 'Africa/Lagos' ) );
+                    $date = $utc_dt->format( 'Y-m-d' );
+                    $time = $utc_dt->format( 'H:i' );
+                } catch ( Exception $e ) {
+                    $date = "$year-$month-$day";
+                    $time = "$hour:$min";
+                }
+            } elseif ( preg_match( '/(\d{2}):(\d{2})/', $time_str, $t_only ) ) {
+                // Only time is present, assume today's date in GMT
+                $hour = $t_only[1];
+                $min  = $t_only[2];
+                try {
+                    $today_gmt = new DateTime( 'now', new DateTimeZone( 'UTC' ) );
+                    $today_gmt->setTime( intval($hour), intval($min) );
+                    $today_gmt->setTimezone( new DateTimeZone( 'Africa/Lagos' ) );
+                    $date = $today_gmt->format( 'Y-m-d' );
+                    $time = $today_gmt->format( 'H:i' );
+                } catch ( Exception $e ) {
+                    $time = sprintf( '%02d:%02d', (intval($hour) + 1) % 24, intval($min) );
+                }
             }
         }
 
@@ -510,6 +532,7 @@ class Crane_Free_Prediction_Scraper {
             'away'       => sanitize_text_field( $away ),
             'league'     => sanitize_text_field( $league ),
             'time'       => sanitize_text_field( $time ),
+            'date'       => sanitize_text_field( $date ),
             'prediction' => $prediction,
             'home_prob'  => $home_prob,
             'draw_prob'  => $draw_prob,
@@ -958,35 +981,38 @@ class Crane_Free_Prediction_Scraper {
         // FIFA World Cup: runs ~June 11 – July 19 every 4 years starting 2026
         $wc_years = [ 2026, 2030, 2034, 2038 ];
         if ( in_array( $year, $wc_years, true ) ) {
-            if ( $month === 6 && $day >= 11 ) return true;
-            if ( $month === 7 && $day <= 19 ) return true;
+            if ( ( $month === 6 && $day >= 11 ) || ( $month === 7 && $day <= 19 ) ) {
+                return "FIFA World Cup $year";
+            }
         }
 
         // UEFA European Championship: runs ~June 14 – July 14 every 4 years
-        // 2024 was last; 2028 is next
         $euro_years = [ 2024, 2028, 2032, 2036 ];
         if ( in_array( $year, $euro_years, true ) ) {
-            if ( $month === 6 && $day >= 14 ) return true;
-            if ( $month === 7 && $day <= 14 ) return true;
+            if ( ( $month === 6 && $day >= 14 ) || ( $month === 7 && $day <= 14 ) ) {
+                return "UEFA Euro $year";
+            }
         }
 
-        // Copa América: approximately June–July, tends to run in non-WC years
-        // We broadly cover June 15 – July 15 for odd-even patterns
-        // (2021, 2024, 2027, 2031 …)
+        // Copa América: approximately June–July
         $copa_years = [ 2021, 2024, 2027, 2031, 2035 ];
         if ( in_array( $year, $copa_years, true ) ) {
-            if ( $month === 6 && $day >= 15 ) return true;
-            if ( $month === 7 && $day <= 15 ) return true;
+            if ( ( $month === 6 && $day >= 15 ) || ( $month === 7 && $day <= 15 ) ) {
+                return "Copa América $year";
+            }
         }
 
         // CONCACAF Gold Cup: odd years, roughly June 15 – July 16
         if ( $year % 2 !== 0 ) {
-            if ( $month === 6 && $day >= 15 ) return true;
-            if ( $month === 7 && $day <= 16 ) return true;
+            if ( ( $month === 6 && $day >= 15 ) || ( $month === 7 && $day <= 16 ) ) {
+                return "CONCACAF Gold Cup $year";
+            }
         }
 
         // UEFA Nations League Finals: June, even years
-        if ( $year % 2 === 0 && $month === 6 ) return true;
+        if ( $year % 2 === 0 && $month === 6 ) {
+            return "UEFA Nations League Finals $year";
+        }
 
         return false;
     }

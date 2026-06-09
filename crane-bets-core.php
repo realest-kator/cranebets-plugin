@@ -1113,9 +1113,16 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                     $d_os = (int) $now_os->format( 'j' );
                     $y_os = (int) $now_os->format( 'Y' );
                     $is_os = ( $m_os === 6 || $m_os === 7 ) || ( $m_os === 5 && $d_os >= 16 ) || ( $m_os === 8 && $d_os <= 14 );
+                    $is_tournament = false;
                     $wc_years = [2026, 2030, 2034, 2038];
-                    $is_tournament = in_array( $y_os, $wc_years, true ) && ( ( $m_os === 6 && $d_os >= 11 ) || ( $m_os === 7 && $d_os <= 19 ) );
-                    $now_os = new DateTime( 'now', $tz_os );
+                    $euro_years = [2024, 2028, 2032, 2036];
+                    if ( in_array( $y_os, $wc_years, true ) && ( ( $m_os === 6 && $d_os >= 11 ) || ( $m_os === 7 && $d_os <= 19 ) ) ) {
+                        $is_tournament = "FIFA World Cup $y_os";
+                    } elseif ( in_array( $y_os, $euro_years, true ) && ( ( $m_os === 6 && $d_os >= 14 ) || ( $m_os === 7 && $d_os <= 14 ) ) ) {
+                        $is_tournament = "UEFA Euro $y_os";
+                    } elseif ( $y_os % 2 === 0 && $m_os === 6 ) {
+                        $is_tournament = "UEFA Nations League Finals $y_os";
+                    }
                 }
                 ?>
                 <p style="margin-top:12px; font-size:12px; color:<?php echo $is_os && ! $is_tournament ? '#d63638' : '#00a32a'; ?>;">
@@ -1131,7 +1138,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                 <p style="margin-top:6px; font-size:12px; color:<?php echo $is_tournament ? '#00a32a' : '#888'; ?>;">
                     <strong>Major Tournament Status:</strong>
                     <?php if ( $is_tournament ) : ?>
-                        &#x1F3C6; <strong>ACTIVE</strong> &mdash; FIFA World Cup 2026 / International tournament running. Predictions expanded to 40/cycle, international pages fetched.
+                        &#x1F3C6; <strong>ACTIVE</strong> &mdash; <?php echo esc_html( $is_tournament ); ?> running. Predictions expanded to 40/cycle, international pages fetched.
                     <?php else : ?>
                         &#x26AA; No major international tournament currently active.
                     <?php endif; ?>
