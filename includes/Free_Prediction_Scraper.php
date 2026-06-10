@@ -198,54 +198,61 @@ class Crane_Free_Prediction_Scraper {
     }
 
     /**
-     * Delete crane_prediction posts whose match_date is before today (WAT).
+     * Delete crane_prediction posts whose match datetime is older than 24 hours.
      * Runs at the start of every scrape cycle.
      */
     public static function cleanup_old_predictions() {
-        $tz      = new DateTimeZone( 'Africa/Lagos' );
-        $today   = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+        $tz  = new DateTimeZone( 'Africa/Lagos' );
+        $now = new DateTime( 'now', $tz );
+        $now_timestamp = $now->getTimestamp();
 
-        $old = new WP_Query( [
+        $all_posts = new WP_Query( array(
             'post_type'      => 'crane_prediction',
-            'post_status'    => 'any',
-            'posts_per_page' => 200,
+            'posts_per_page' => 500,
             'fields'         => 'ids',
-            'meta_query'     => [
-                'relation' => 'OR',
-                [
-                    // Has a match_date set and it is before today
-                    'key'     => 'match_date',
-                    'value'   => $today,
-                    'compare' => '<',
-                    'type'    => 'DATE',
-                ],
-                [
-                    // Also delete posts where match_date is not set at all but post is older than 2 days
-                    'key'     => 'match_date',
-                    'compare' => 'NOT EXISTS',
-                ],
-            ],
-        ] );
+            'post_status'    => 'any',
+        ) );
 
         $deleted = 0;
-        foreach ( $old->posts as $pid ) {
-            // Extra guard: if match_date is today, skip
+        foreach ( $all_posts->posts as $pid ) {
             $match_date = get_post_meta( $pid, 'match_date', true );
-            if ( $match_date === $today ) continue;
-
-            // If no match_date, only delete posts older than 2 days
             if ( empty( $match_date ) ) {
+                // If no match_date exists, fall back to post_date. Delete if post is older than 2 days.
                 $post_date = get_post_field( 'post_date', $pid );
-                if ( $post_date && strtotime( $post_date ) > strtotime( '-2 days' ) ) continue;
+                if ( $post_date && ( $now_timestamp - strtotime( $post_date ) ) > 2 * 86400 ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+                continue;
             }
 
-            wp_delete_post( $pid, true );
-            $deleted++;
+            $match_time = get_post_meta( $pid, 'match_time', true ) ?: '00:00';
+            // Clean match_time if it contains LIVE or other text, extract HH:MM if possible
+            $time_part = '00:00';
+            if ( preg_match( '/(\d{1,2}):(\d{2})/', $match_time, $matches ) ) {
+                $time_part = sprintf( '%02d:%02d', intval( $matches[1] ), intval( $matches[2] ) );
+            }
+
+            try {
+                $match_datetime = new DateTime( $match_date . ' ' . $time_part, $tz );
+                $match_timestamp = $match_datetime->getTimestamp();
+                if ( ( $now_timestamp - $match_timestamp ) >= 86400 ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+            } catch ( Exception $e ) {
+                // If parsing fails, delete if the match_date is strictly before today
+                $today = $now->format( 'Y-m-d' );
+                if ( $match_date < $today ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+            }
         }
         wp_reset_postdata();
 
         if ( $deleted > 0 ) {
-            error_log( "Crane Cleanup: Deleted {$deleted} past predictions (before {$today})." );
+            error_log( "Crane Cleanup: Deleted {$deleted} past predictions older than 24 hours." );
         }
         return $deleted;
     }
@@ -265,40 +272,108 @@ class Crane_Free_Prediction_Scraper {
             return 0;
         }
 
-        $html = self::fetch_url( self::FOREBET_TODAY );
-        if ( ! $html ) {
-            error_log( 'Crane Forebet: Could not fetch today page (blocked or down).' );
+        $tz = new DateTimeZone( 'Africa/Lagos' );
+        $today_dt = new DateTime( 'now', $tz );
+        $today_str = $today_dt->format( 'Y-m-d' );
+
+        // DB Guard check: Do we already have matches for today in the database?
+        $has_today = false;
+        $has_today_matches = new WP_Query( array(
+            'post_type'      => 'crane_prediction',
+            'meta_key'       => 'match_date',
+            'meta_value'     => $today_str,
+            'posts_per_page' => 1,
+            'post_status'    => 'any',
+            'fields'         => 'ids',
+        ) );
+        if ( $has_today_matches->have_posts() ) {
+            $has_today = true;
+        }
+        wp_reset_postdata();
+
+        $deduped = [];
+        $seen = [];
+        $target_date = '';
+
+        if ( $has_today ) {
+            // Lock target to today's date
+            $target_date = $today_str;
+            $today_url = 'https://www.forebet.com/en/football-predictions/' . $target_date;
+            $html = self::fetch_url( $today_url );
+            $matches = [];
+            if ( $html ) {
+                $matches = self::parse_forebet_html( $html );
+            }
+
+            // Top up with African leagues for today
+            $africa_html = self::fetch_url( self::FOREBET_AFRICA );
+            if ( $africa_html ) {
+                $africa_matches = self::parse_forebet_html( $africa_html );
+                $matches = array_merge( $matches, $africa_matches );
+            }
+
+            // Deduplicate
+            foreach ( $matches as $m ) {
+                // Force match date to target_date if it belongs to today's fetch
+                $m['date'] = $target_date;
+                $key = strtolower( $m['home'] . '|' . $m['away'] );
+                if ( ! isset( $seen[ $key ] ) ) {
+                    $seen[ $key ] = true;
+                    $deduped[] = $m;
+                }
+            }
+        } else {
+            // Loop up to 14 days starting from today to find nearest date with matches
+            for ( $i = 0; $i < 14; $i++ ) {
+                $current_dt = clone $today_dt;
+                if ( $i > 0 ) {
+                    $current_dt->modify( "+{$i} days" );
+                }
+                $check_date = $current_dt->format( 'Y-m-d' );
+                $check_url = 'https://www.forebet.com/en/football-predictions/' . $check_date;
+
+                $html = self::fetch_url( $check_url );
+                $matches = [];
+                if ( $html ) {
+                    $matches = self::parse_forebet_html( $html );
+                }
+
+                // If check date is today, top up with African leagues
+                if ( $i === 0 ) {
+                    $africa_html = self::fetch_url( self::FOREBET_AFRICA );
+                    if ( $africa_html ) {
+                        $africa_matches = self::parse_forebet_html( $africa_html );
+                        $matches = array_merge( $matches, $africa_matches );
+                    }
+                }
+
+                if ( ! empty( $matches ) ) {
+                    $target_date = $check_date;
+                    // Deduplicate
+                    foreach ( $matches as $m ) {
+                        // Force match date to the target check date
+                        $m['date'] = $target_date;
+                        $key = strtolower( $m['home'] . '|' . $m['away'] );
+                        if ( ! isset( $seen[ $key ] ) ) {
+                            $seen[ $key ] = true;
+                            $deduped[] = $m;
+                        }
+                    }
+                    error_log( 'Crane Forebet: Nearest date with predictions found on ' . $target_date . ' with ' . count( $deduped ) . ' matches.' );
+                    break;
+                }
+            }
+        }
+
+        if ( empty( $deduped ) || empty( $target_date ) ) {
+            error_log( 'Crane Forebet Scraper: No predictions found in the next 14 days.' );
             return 0;
         }
 
-        $matches = self::parse_forebet_html( $html );
-
-        // ── International / World Cup page fetch ──────────────────────────────
-        // Always attempt the international predictions page when a major
-        // tournament is active (World Cup, Euros, Copa América, etc.).
-        if ( self::is_major_tournament_active() ) {
-            error_log( 'Crane Forebet: Major tournament active — fetching international predictions page.' );
-
-            $intl_html = self::fetch_url( self::FOREBET_INTERNATIONAL );
-            if ( $intl_html ) {
-                $intl_matches = self::parse_forebet_html( $intl_html );
-                $matches      = array_merge( $matches, $intl_matches );
-                error_log( 'Crane Forebet: International page added ' . count( $intl_matches ) . ' matches.' );
-            }
-
-            // Also try the dedicated World Cup predictions page
-            $wc_html = self::fetch_url( self::FOREBET_WORLD_CUP );
-            if ( $wc_html ) {
-                $wc_matches = self::parse_forebet_html( $wc_html );
-                $matches    = array_merge( $matches, $wc_matches );
-                error_log( 'Crane Forebet: World Cup page added ' . count( $wc_matches ) . ' matches.' );
-            }
-        }
-
-        // ── Separate priority (EU/International) from other ───────────────────
+        // Sort: Priority (European/Major) first, then other
         $priority = [];
-        $other    = [];
-        foreach ( $matches as $m ) {
+        $other = [];
+        foreach ( $deduped as $m ) {
             if ( self::is_european_league( $m['league'] ) ) {
                 $priority[] = $m;
             } else {
@@ -306,38 +381,7 @@ class Crane_Free_Prediction_Scraper {
             }
         }
 
-        // Deduplicate by home+away pair (cross-page duplicates)
-        $seen      = [];
-        $deduped   = [];
-        $all_found = array_merge( $priority, $other );
-        foreach ( $all_found as $m ) {
-            $key = strtolower( $m['home'] . '|' . $m['away'] );
-            if ( ! isset( $seen[ $key ] ) ) {
-                $seen[ $key ] = true;
-                $deduped[]    = $m;
-            }
-        }
-
-        // ── Off-season fallback ───────────────────────────────────────────────
-        $to_store = $priority;
-        if ( empty( $priority ) || self::is_off_season() ) {
-            error_log( 'Crane Forebet: EU off-season or no priority matches — fetching African leagues.' );
-            $africa_html = self::fetch_url( self::FOREBET_AFRICA );
-            if ( $africa_html ) {
-                $africa_matches = self::parse_forebet_html( $africa_html );
-                // Prioritise Nigerian leagues within Africa results
-                usort( $africa_matches, function( $a, $b ) {
-                    $a_is_ng = ( stripos( $a['league'], 'nigeria' ) !== false || stripos( $a['league'], 'npfl' ) !== false );
-                    $b_is_ng = ( stripos( $b['league'], 'nigeria' ) !== false || stripos( $b['league'], 'npfl' ) !== false );
-                    return (int) $b_is_ng - (int) $a_is_ng;
-                } );
-                $to_store = array_merge( $to_store, $africa_matches );
-            } else {
-                $to_store = $deduped; // use everything we found
-            }
-        } else {
-            $to_store = $deduped; // include all deduped matches (priority first)
-        }
+        $to_store = array_merge( $priority, $other );
 
         // Raise cap to 40 during major tournaments, 20 otherwise
         $cap      = self::is_major_tournament_active() ? 40 : 20;
@@ -352,7 +396,7 @@ class Crane_Free_Prediction_Scraper {
 
         // Cache for 6 hours so we don't hammer Forebet
         set_transient( 'crane_forebet_last_run', true, 6 * HOUR_IN_SECONDS );
-        error_log( "Crane Forebet: Imported {$imported} predictions (cap={$cap})." );
+        error_log( "Crane Forebet: Imported {$imported} predictions for date {$target_date} (cap={$cap})." );
         return $imported;
     }
 

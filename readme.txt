@@ -3,7 +3,7 @@ Contributors: ashiekaa
 Requires PHP: 7.4
 Requires at least: 6.0
 Tested up to: 6.4
-Version: 1.1.1
+Version: 1.1.2
 License: GPLv2 or later
 
 == Description ==
@@ -15,6 +15,14 @@ Backbone functionality for the Crane Bets platform. Handles VIP subscriptions, p
 3. Configure settings in the Crane Admin panel.
 
 == Changelog ==
+= 1.1.2 =
+* Reduced prediction sync CRON interval from 2 hours to 6 hours to lower server load.
+* Extended prediction search window from 7 days to 14 days to prevent empty matches during quiet football periods.
+* Added a Today-Lock guard so future predictions don't crowd out today's games.
+* Switched cleanup routine to immediate 24-hour post-match deletion based on actual match time.
+* Added automatic cache purging supporting WP Rocket, LiteSpeed Cache, W3TC, and WP Fastest Cache.
+* Added color-coded native admin notices to the API-Football manual "Sync Now" button detailing exact sync results or validation errors.
+
 = 1.1.1 =
 * Fixed match date parsing & WAT (Africa/Lagos) timezone conversion.
 * Skip non-active match statuses (e.g. FT, PST, ABD) and pending prediction cards.

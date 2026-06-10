@@ -279,6 +279,9 @@ class Crane_Prediction_API_Service {
      * This runs via WP Cron every 30 minutes
      */
     public static function sync_predictions() {
+        // Always clean up old predictions first (delete 24h old and older)
+        self::cleanup_old_predictions();
+
         $source = get_option( 'crane_prediction_source', 'forebet_odds' );
         if ( ! in_array( $source, array( 'api_football', 'all' ), true ) ) {
             error_log( 'Crane Predictions Sync: API-Football not selected. Skipping.' );
@@ -291,63 +294,135 @@ class Crane_Prediction_API_Service {
             return;
         }
 
-        // Get today's date in Lagos timezone
-        $tz    = new DateTimeZone( 'Africa/Lagos' );
-        $today = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
-        $year  = (int) ( new DateTime( 'now', $tz ) )->format( 'Y' );
+        // Search for nearest date with active matches in Lagos timezone (up to 14 days)
+        $tz = new DateTimeZone( 'Africa/Lagos' );
+        $today_dt = new DateTime( 'now', $tz );
+        
+        $fixtures = array();
+        $target_date = '';
+        $target_year = (int)$today_dt->format( 'Y' );
 
-        // Fetch fixtures for today (general — catches most leagues)
-        $fixtures = self::api_request( '/fixtures', array(
-            'date'     => $today,
-            'timezone' => 'Africa/Lagos',
-        ), 120 ); // Cache for 120 minutes
+        // DB Guard check: Do we already have matches for today in the database?
+        $has_today_query = new WP_Query( array(
+            'post_type'      => 'crane_prediction',
+            'meta_key'       => 'match_date',
+            'meta_value'     => $today_dt->format( 'Y-m-d' ),
+            'posts_per_page' => 1,
+            'post_status'    => 'any',
+            'fields'         => 'ids',
+        ) );
+        $has_today = $has_today_query->have_posts();
+        wp_reset_postdata();
 
-        if ( ! $fixtures ) {
-            $fixtures = array();
-        }
+        if ( $has_today ) {
+            // If today matches already exist locally, lock target to today (do not jump to future dates)
+            $target_date = $today_dt->format( 'Y-m-d' );
+            $target_year = (int)$today_dt->format( 'Y' );
 
-        // ── Priority league ID top-up ─────────────────────────────────────────
-        // The global ?date= endpoint is paginated and the free tier may not
-        // return all competitions. We explicitly query high-value league IDs so
-        // World Cup, Nations League and top cups are never silently dropped.
-        //
-        // API-Football league IDs:
-        //   1  = FIFA World Cup          4  = UEFA Euro Championship
-        //   9  = UEFA Nations League    15  = FIFA Club World Cup
-        //   2  = UEFA Champions League   3  = UEFA Europa League
-        //  848 = UEFA Conference League
-        $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
-
-        // Collect existing fixture IDs to avoid duplicates before merging
-        $existing_ids = array();
-        foreach ( $fixtures as $f ) {
-            if ( isset( $f['fixture']['id'] ) ) {
-                $existing_ids[ $f['fixture']['id'] ] = true;
-            }
-        }
-
-        foreach ( $priority_league_ids as $lid ) {
-            $extra = self::api_request( '/fixtures', array(
-                'league'   => $lid,
-                'season'   => $year,
-                'date'     => $today,
+            $fixtures = self::api_request( '/fixtures', array(
+                'date'     => $target_date,
                 'timezone' => 'Africa/Lagos',
-            ), 120 );
+            ), 120 ); // Cache for 120 minutes
 
-            if ( is_array( $extra ) && ! empty( $extra ) ) {
-                foreach ( $extra as $ef ) {
-                    $efid = $ef['fixture']['id'] ?? 0;
-                    if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
-                        $fixtures[]              = $ef;
-                        $existing_ids[ $efid ]   = true;
+            if ( ! is_array( $fixtures ) ) {
+                $fixtures = array();
+            }
+
+            // ── Priority league ID top-up ─────────────────────────────────────
+            $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
+            $existing_ids = array();
+            foreach ( $fixtures as $f ) {
+                if ( isset( $f['fixture']['id'] ) ) {
+                    $existing_ids[ $f['fixture']['id'] ] = true;
+                }
+            }
+
+            foreach ( $priority_league_ids as $lid ) {
+                $extra = self::api_request( '/fixtures', array(
+                    'league'   => $lid,
+                    'season'   => $target_year,
+                    'date'     => $target_date,
+                    'timezone' => 'Africa/Lagos',
+                ), 120 );
+
+                if ( is_array( $extra ) && ! empty( $extra ) ) {
+                    foreach ( $extra as $ef ) {
+                        $efid = $ef['fixture']['id'] ?? 0;
+                        if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
+                            $fixtures[]              = $ef;
+                            $existing_ids[ $efid ]   = true;
+                        }
                     }
                 }
-                error_log( 'Crane API-Football: Merged ' . count( $extra ) . ' fixtures from priority league ID ' . $lid );
+            }
+        } else {
+            // Loop up to 14 days starting from today to find the nearest date with matches
+            for ( $i = 0; $i < 14; $i++ ) {
+                $current_dt = clone $today_dt;
+                if ( $i > 0 ) {
+                    $current_dt->modify( "+{$i} days" );
+                }
+                $check_date = $current_dt->format( 'Y-m-d' );
+                $check_year = (int)$current_dt->format( 'Y' );
+
+                $fixtures = self::api_request( '/fixtures', array(
+                    'date'     => $check_date,
+                    'timezone' => 'Africa/Lagos',
+                ), 120 ); // Cache for 120 minutes
+
+                if ( ! is_array( $fixtures ) ) {
+                    $fixtures = array();
+                }
+
+                // ── Priority league ID top-up for this check date ─────────────────
+                $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
+                $existing_ids = array();
+                foreach ( $fixtures as $f ) {
+                    if ( isset( $f['fixture']['id'] ) ) {
+                        $existing_ids[ $f['fixture']['id'] ] = true;
+                    }
+                }
+
+                foreach ( $priority_league_ids as $lid ) {
+                    $extra = self::api_request( '/fixtures', array(
+                        'league'   => $lid,
+                        'season'   => $check_year,
+                        'date'     => $check_date,
+                        'timezone' => 'Africa/Lagos',
+                    ), 120 );
+
+                    if ( is_array( $extra ) && ! empty( $extra ) ) {
+                        foreach ( $extra as $ef ) {
+                            $efid = $ef['fixture']['id'] ?? 0;
+                            if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
+                                $fixtures[]              = $ef;
+                                $existing_ids[ $efid ]   = true;
+                            }
+                        }
+                    }
+                }
+
+                // Filter out completed/cancelled matches to see if we have actionable matches
+                $active_count = 0;
+                $skip_statuses = [ 'FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO', 'PST' ];
+                foreach ( $fixtures as $fixture ) {
+                    $status_short = isset($fixture['fixture']['status']['short']) ? $fixture['fixture']['status']['short'] : 'NS';
+                    if ( ! in_array( $status_short, $skip_statuses, true ) ) {
+                        $active_count++;
+                    }
+                }
+
+                if ( $active_count > 0 ) {
+                    $target_date = $check_date;
+                    $target_year = $check_year;
+                    error_log( 'Crane API-Football: Nearest date with active matches found on ' . $target_date . ' with ' . $active_count . ' fixtures.' );
+                    break;
+                }
             }
         }
 
-        if ( empty( $fixtures ) ) {
-            error_log( 'Crane Predictions Sync: No fixtures returned for ' . $today );
+        if ( empty( $fixtures ) || empty( $target_date ) ) {
+            error_log( 'Crane Predictions Sync: No upcoming fixtures returned in the next 14 days.' );
             return;
         }
 
@@ -384,7 +459,6 @@ class Crane_Prediction_API_Service {
             // API-Football sends ISO 8601 UTC timestamps; we convert to WAT for display.
             $match_dt = new DateTime( $match_date );       // Parse as UTC
             $match_dt->setTimezone( $tz );                 // Convert to Africa/Lagos (WAT = UTC+1)
-            $today_wat = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
 
             // Live status — keep a human-readable LIVE string
             $live_statuses = array( '1H', '2H', 'HT', 'ET', 'P', 'LIVE', 'BT' );
@@ -483,7 +557,18 @@ class Crane_Prediction_API_Service {
             $synced++;
         }
 
-        error_log( 'Crane Predictions Sync: ' . $synced . ' matches synced for ' . $today );
+        // Clear transients
+        delete_transient( 'crane_front_matches_html' );
+        delete_transient( 'crane_front_locker_preview' );
+        delete_transient( 'crane_front_matches_pool' );
+
+        // Purge page caches
+        if ( class_exists( 'Crane_Free_Prediction_Scraper' ) ) {
+            Crane_Free_Prediction_Scraper::purge_page_caches();
+        }
+
+        error_log( 'Crane Predictions Sync: ' . $synced . ' matches synced for ' . $target_date );
+        return $synced;
     }
 
     /**
@@ -499,82 +584,132 @@ class Crane_Prediction_API_Service {
         $api_key = self::get_api_key();
         if ( empty( $api_key ) ) return;
 
-        $tz = new DateTimeZone( 'Africa/Lagos' );
-        $today = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+        // Retrieve unique match dates from the database to query odds
+        global $wpdb;
+        $dates = $wpdb->get_col( "
+            SELECT DISTINCT pm.meta_value 
+            FROM {$wpdb->postmeta} pm
+            JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+            WHERE p.post_type = 'crane_prediction' 
+              AND p.post_status = 'publish' 
+              AND pm.meta_key = 'match_date'
+        " );
 
-        $odds_data = self::api_request( '/odds', array(
-            'date'     => $today,
-            'timezone' => 'Africa/Lagos',
-            'bookmaker' => 8, // Bet365
-        ), 360 ); // Cache for 6 hours (odds don't change that much)
+        if ( empty( $dates ) ) return;
 
-        if ( ! $odds_data ) return;
+        foreach ( $dates as $target_date ) {
+            $odds_data = self::api_request( '/odds', array(
+                'date'     => $target_date,
+                'timezone' => 'Africa/Lagos',
+                'bookmaker' => 8, // Bet365
+            ), 360 ); // Cache for 6 hours (odds don't change that much)
 
-        foreach ( $odds_data as $match_odds ) {
-            $fixture_id = isset($match_odds['fixture']['id']) ? $match_odds['fixture']['id'] : 0;
-            if ( ! $fixture_id ) continue;
+            if ( ! $odds_data ) continue;
 
-            // Find our post
-            $existing = new WP_Query( array(
-                'post_type'   => 'crane_prediction',
-                'meta_key'    => 'fixture_id',
-                'meta_value'  => $fixture_id,
-                'posts_per_page' => 1,
-                'fields'      => 'ids',
-            ) );
+            foreach ( $odds_data as $match_odds ) {
+                $fixture_id = isset($match_odds['fixture']['id']) ? $match_odds['fixture']['id'] : 0;
+                if ( ! $fixture_id ) continue;
 
-            if ( ! $existing->have_posts() ) { wp_reset_postdata(); continue; }
-            $post_id = $existing->posts[0];
-            wp_reset_postdata();
+                // Find our post
+                $existing = new WP_Query( array(
+                    'post_type'   => 'crane_prediction',
+                    'meta_key'    => 'fixture_id',
+                    'meta_value'  => $fixture_id,
+                    'posts_per_page' => 1,
+                    'fields'      => 'ids',
+                ) );
 
-            // Parse 1X2 odds
-            $bookmakers = isset($match_odds['bookmakers']) ? $match_odds['bookmakers'] : array();
-            foreach ( $bookmakers as $bm ) {
-                $bets = isset($bm['bets']) ? $bm['bets'] : array();
-                foreach ( $bets as $bet ) {
-                    if ( ( isset($bet['name']) ? $bet['name'] : '' ) === 'Match Winner' ) {
-                        foreach ( $bet['values'] as $v ) {
-                            if ( $v['value'] === 'Home' )  update_post_meta( $post_id, 'match_odd1', $v['odd'] );
-                            if ( $v['value'] === 'Draw' )  update_post_meta( $post_id, 'match_oddX', $v['odd'] );
-                            if ( $v['value'] === 'Away' )  update_post_meta( $post_id, 'match_odd2', $v['odd'] );
+                if ( ! $existing->have_posts() ) { wp_reset_postdata(); continue; }
+                $post_id = $existing->posts[0];
+                wp_reset_postdata();
+
+                // Parse 1X2 odds
+                $bookmakers = isset($match_odds['bookmakers']) ? $match_odds['bookmakers'] : array();
+                foreach ( $bookmakers as $bm ) {
+                    $bets = isset($bm['bets']) ? $bm['bets'] : array();
+                    foreach ( $bets as $bet ) {
+                        if ( ( isset($bet['name']) ? $bet['name'] : '' ) === 'Match Winner' ) {
+                            foreach ( $bet['values'] as $v ) {
+                                if ( $v['value'] === 'Home' )  update_post_meta( $post_id, 'match_odd1', $v['odd'] );
+                                if ( $v['value'] === 'Draw' )  update_post_meta( $post_id, 'match_oddX', $v['odd'] );
+                                if ( $v['value'] === 'Away' )  update_post_meta( $post_id, 'match_odd2', $v['odd'] );
+                            }
+                            break 2; // Got what we need
                         }
-                        break 2; // Got what we need
                     }
                 }
             }
         }
 
-        error_log( 'Crane Odds Sync: Complete for ' . $today );
+        // Clear transients
+        delete_transient( 'crane_front_matches_html' );
+        delete_transient( 'crane_front_locker_preview' );
+        delete_transient( 'crane_front_matches_pool' );
+
+        // Purge page caches
+        if ( class_exists( 'Crane_Free_Prediction_Scraper' ) ) {
+            Crane_Free_Prediction_Scraper::purge_page_caches();
+        }
+
+        error_log( 'Crane Odds Sync: Complete for target dates: ' . implode( ', ', $dates ) );
     }
 
     /**
-     * Clean up old predictions (older than 2 days)
+     * Clean up old predictions (older than 24 hours based on match datetime)
      * Runs daily to keep the homepage fresh
      */
     public static function cleanup_old_predictions() {
-        $tz    = new DateTimeZone( 'Africa/Lagos' );
-        $today = ( new DateTime( 'now', $tz ) )->format( 'Y-m-d' );
+        $tz  = new DateTimeZone( 'Africa/Lagos' );
+        $now = new DateTime( 'now', $tz );
+        $now_timestamp = $now->getTimestamp();
 
-        $old_posts = new WP_Query( array(
+        $all_posts = new WP_Query( array(
             'post_type'      => 'crane_prediction',
-            'meta_key'       => 'match_date',
-            'meta_value'     => $today,
-            'meta_compare'   => '<',
-            'meta_type'      => 'DATE',
             'posts_per_page' => 500,
             'fields'         => 'ids',
             'post_status'    => 'any',
         ) );
 
         $deleted = 0;
-        foreach ( $old_posts->posts as $pid ) {
-            wp_delete_post( $pid, true );
-            $deleted++;
+        foreach ( $all_posts->posts as $pid ) {
+            $match_date = get_post_meta( $pid, 'match_date', true );
+            if ( empty( $match_date ) ) {
+                // If no match_date exists, fall back to post_date. Delete if post is older than 2 days.
+                $post_date = get_post_field( 'post_date', $pid );
+                if ( $post_date && ( $now_timestamp - strtotime( $post_date ) ) > 2 * 86400 ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+                continue;
+            }
+
+            $match_time = get_post_meta( $pid, 'match_time', true ) ?: '00:00';
+            // Clean match_time if it contains LIVE or other text, extract HH:MM if possible
+            $time_part = '00:00';
+            if ( preg_match( '/(\d{1,2}):(\d{2})/', $match_time, $matches ) ) {
+                $time_part = sprintf( '%02d:%02d', intval( $matches[1] ), intval( $matches[2] ) );
+            }
+
+            try {
+                $match_datetime = new DateTime( $match_date . ' ' . $time_part, $tz );
+                $match_timestamp = $match_datetime->getTimestamp();
+                if ( ( $now_timestamp - $match_timestamp ) >= 86400 ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+            } catch ( Exception $e ) {
+                // If parsing fails, delete if the match_date is strictly before today
+                $today = $now->format( 'Y-m-d' );
+                if ( $match_date < $today ) {
+                    wp_delete_post( $pid, true );
+                    $deleted++;
+                }
+            }
         }
         wp_reset_postdata();
 
         if ( $deleted > 0 ) {
-            error_log( "Crane API Cleanup: Removed {$deleted} predictions with match_date before {$today} WAT." );
+            error_log( "Crane API Cleanup: Removed {$deleted} predictions older than 24 hours." );
         }
     }
 
@@ -585,10 +720,46 @@ class Crane_Prediction_API_Service {
         check_admin_referer( 'crane_manual_sync' );
         if ( ! current_user_can( 'manage_options' ) ) wp_die( 'Unauthorized' );
 
-        self::sync_predictions();
-        self::sync_odds();
+        $source  = get_option( 'crane_prediction_source', 'forebet_odds' );
+        $api_key = self::get_api_key();
 
-        wp_redirect( admin_url( 'admin.php?page=crane-api-settings&crane_msg=Predictions+synced+successfully' ) );
+        $status = 'success';
+        $synced = 0;
+        $reason = '';
+
+        if ( ! in_array( $source, array( 'api_football', 'all' ), true ) ) {
+            $status = 'skipped';
+            $src_labels = [
+                'forebet'      => 'Forebet Only',
+                'odds_api'     => 'The Odds API Only',
+                'forebet_odds' => 'Forebet + The Odds API',
+            ];
+            $label  = isset( $src_labels[ $source ] ) ? $src_labels[ $source ] : $source;
+            $reason = 'API-Football sync skipped — current source is set to "' . $label . '". Change the Prediction Source to "All Sources" or "API-Football Only" to enable this sync.';
+        } elseif ( empty( $api_key ) ) {
+            $status = 'error';
+            $reason = 'No API-Football key configured. Please enter your API key in the field above and save before syncing.';
+        } else {
+            $synced = self::sync_predictions();
+            if ( $synced === null || $synced === false ) {
+                $synced = 0;
+            }
+            self::sync_odds();
+
+            if ( (int) $synced > 0 ) {
+                $reason = sprintf( 'Successfully imported/updated %d prediction matches from API-Football.', $synced );
+            } else {
+                $reason = 'No new predictions were imported. Existing matches are already up to date, or no upcoming fixtures were found in the next 14 days.';
+                $status = 'info';
+            }
+        }
+
+        $redirect = admin_url( 'admin.php?page=crane-api-settings'
+            . '&apif_status=' . urlencode( $status )
+            . '&apif_synced=' . intval( $synced )
+            . '&apif_reason=' . urlencode( $reason )
+        );
+        wp_redirect( $redirect );
         exit;
     }
 }

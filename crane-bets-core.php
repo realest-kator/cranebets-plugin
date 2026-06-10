@@ -2,7 +2,7 @@
 /*
 Plugin Name: Crane Bets Core
 Description: Backbone functionality for Crane bets Theme (VIP Timer, Accuracy, API Sync, Demo Tools).
-Version: 1.1.1
+Version: 1.1.2
 Author: Ashiekaa Elijah
 Author URI: https://kator.vercel.app/
 
@@ -242,7 +242,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
      * Covers zip re-uploads where register_activation_hook doesn't fire.
      */
     public function maybe_run_upgrade() {
-        $current_version = '1.1';
+        $current_version = '1.1.2';
         $stored_version  = get_option( 'crane_plugin_version', '0' );
         if ( $stored_version === $current_version ) return;
 
@@ -276,9 +276,9 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
 
         // Ensure CRONs exist (safe — wp_next_scheduled guards against dupes)
         $predictions_schedule = wp_get_schedule( 'crane_sync_predictions_cron_v2' );
-        if ( ! $predictions_schedule || $predictions_schedule !== 'crane_2hours' ) {
+        if ( ! $predictions_schedule || $predictions_schedule !== 'crane_6hours' ) {
             wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
-            wp_schedule_event( time(), 'crane_2hours', 'crane_sync_predictions_cron_v2' );
+            wp_schedule_event( time(), 'crane_6hours', 'crane_sync_predictions_cron_v2' );
         }
         if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
             wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
@@ -393,9 +393,14 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
     public static function setup_action_scheduler_events() {
         if ( ! function_exists( 'as_has_scheduled_action' ) ) return;
 
-        // Replace 30min Sync with AS (High reliability)
+        // Unschedule any old 2-hour AS job
+        if ( function_exists( 'as_unschedule_all_actions' ) ) {
+            as_unschedule_all_actions( 'crane_sync_predictions_as_v2' );
+        }
+
+        // Replace 2-hour Sync with 6-hour Sync (21600 seconds)
         if ( ! as_has_scheduled_action( 'crane_sync_predictions_as_v2' ) ) {
-            as_schedule_recurring_action( time(), 7200, 'crane_sync_predictions_as_v2' );
+            as_schedule_recurring_action( time(), 21600, 'crane_sync_predictions_as_v2' );
         }
         
         // Replacement for Daily odds and cleanup if needed
@@ -890,6 +895,10 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             'interval' => 7200,
             'display'  => 'Every 2 Hours (Crane)'
         );
+        $schedules['crane_6hours'] = array(
+            'interval' => 21600,
+            'display'  => 'Every 6 Hours (Crane)'
+        );
         return $schedules;
     }
 
@@ -1056,6 +1065,31 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                     <?php wp_nonce_field( 'crane_manual_sync' ); ?>
                     <button type="submit" class="button button-primary">Sync Predictions Now</button>
                 </form>
+                <?php if ( isset( $_GET['apif_status'] ) ) :
+                    $apif_status = sanitize_text_field( $_GET['apif_status'] );
+                    $apif_synced = intval( $_GET['apif_synced'] ?? 0 );
+                    $apif_reason = sanitize_text_field( $_GET['apif_reason'] ?? '' );
+
+                    $notice_class = 'notice-success';
+                    $icon = '&#10003;';
+                    if ( $apif_status === 'error' ) {
+                        $notice_class = 'notice-error';
+                        $icon = '&#10007;';
+                    } elseif ( $apif_status === 'skipped' ) {
+                        $notice_class = 'notice-warning';
+                        $icon = '&#9888;';
+                    } elseif ( $apif_status === 'info' || $apif_synced === 0 ) {
+                        $notice_class = 'notice-info';
+                        $icon = '&#8505;';
+                    }
+                ?>
+                    <div class="notice <?php echo $notice_class; ?> inline" style="padding: 12px 16px; margin-top: 10px;">
+                        <p style="margin:0;"><strong><?php echo $icon; ?> <?php echo esc_html( $apif_reason ); ?></strong></p>
+                        <?php if ( $apif_status === 'success' && $apif_synced > 0 ) : ?>
+                            <p style="margin:4px 0 0; font-size:12px; color:#1d2327;">&#9889; <strong>API-Football</strong>: <?php echo $apif_synced; ?> matches imported/updated. Odds synced.</p>
+                        <?php endif; ?>
+                    </div>
+                <?php endif; ?>
             </div>
 
             <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
@@ -1704,7 +1738,7 @@ function crane_bets_core_activation() {
 
     // Schedule CRON jobs — moved here from constructor to avoid race condition with custom intervals
     if ( ! wp_next_scheduled( 'crane_sync_predictions_cron_v2' ) ) {
-        wp_schedule_event( time(), 'crane_2hours', 'crane_sync_predictions_cron_v2' );
+        wp_schedule_event( time(), 'crane_6hours', 'crane_sync_predictions_cron_v2' );
     }
     if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
         wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
