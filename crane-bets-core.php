@@ -2,7 +2,7 @@
 /*
 Plugin Name: Crane Bets Core
 Description: Backbone functionality for Crane bets Theme (VIP Timer, Accuracy, API Sync, Demo Tools).
-Version: 1.1.2
+Version: 1.1.3
 Author: Ashiekaa Elijah
 Author URI: https://kator.vercel.app/
 
@@ -110,12 +110,14 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         // Security: Block direct CPT template access
         add_action( 'template_redirect', array( $this, 'block_cpt_direct_access' ) );
 
-        // Cron Syncs — Prediction API
-        add_action( 'crane_sync_predictions_cron_v2', array( 'Crane_Prediction_API_Service', 'sync_predictions' ) );
-        add_action( 'crane_sync_odds_cron', array( 'Crane_Prediction_API_Service', 'sync_odds' ) );
+        // Cron Syncs — API-Football (exact WAT slots: 00:00, 06:00, 12:00, 18:00)
+        add_action( 'crane_sync_predictions_cron_v2',  array( 'Crane_Prediction_API_Service',  'sync_predictions' ) );
+        add_action( 'crane_sync_odds_cron',            array( 'Crane_Prediction_API_Service',  'sync_odds' ) );
+        // Cron Syncs — Forebet scraper (30 min after API slots: 00:30, 06:30, 12:30, 18:30)
+        add_action( 'crane_scrape_predictions_cron',   array( 'Crane_Free_Prediction_Scraper', 'run_cron_sync' ) );
         // Cleanup hooked to BOTH services so it always runs regardless of source setting
-        add_action( 'crane_cleanup_predictions_cron', array( 'Crane_Prediction_API_Service', 'cleanup_old_predictions' ) );
-        add_action( 'crane_cleanup_predictions_cron', array( 'Crane_Free_Prediction_Scraper', 'cleanup_old_predictions' ) );
+        add_action( 'crane_cleanup_predictions_cron',  array( 'Crane_Prediction_API_Service',  'cleanup_old_predictions' ) );
+        add_action( 'crane_cleanup_predictions_cron',  array( 'Crane_Free_Prediction_Scraper', 'cleanup_old_predictions' ) );
 
         // Manual purge old predictions
         add_action( 'admin_post_crane_purge_old_predictions', array( $this, 'handle_purge_old_predictions' ) );
@@ -242,7 +244,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
      * Covers zip re-uploads where register_activation_hook doesn't fire.
      */
     public function maybe_run_upgrade() {
-        $current_version = '1.1.2';
+        $current_version = '1.1.3';
         $stored_version  = get_option( 'crane_plugin_version', '0' );
         if ( $stored_version === $current_version ) return;
 
@@ -274,12 +276,13 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             }
         }
 
-        // Ensure CRONs exist (safe — wp_next_scheduled guards against dupes)
-        $predictions_schedule = wp_get_schedule( 'crane_sync_predictions_cron_v2' );
-        if ( ! $predictions_schedule || $predictions_schedule !== 'crane_6hours' ) {
-            wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
-            wp_schedule_event( time(), 'crane_6hours', 'crane_sync_predictions_cron_v2' );
-        }
+        // 5. Schedule exact-time WAT prediction cron slots (v1.1.3+)
+        //    Clear any legacy floating schedules first, then set exact slots.
+        wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
+        wp_clear_scheduled_hook( 'crane_scrape_predictions_cron' );
+        self::crane_schedule_prediction_events();
+
+        // Other recurring events
         if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
             wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
         }
@@ -295,11 +298,10 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             wp_schedule_event( time(), 'hourly', 'crane_fetch_news_cron' );
         }
 
-        if ( version_compare( $stored_version, '1.0.1', '<' ) ) {
-            wp_clear_scheduled_hook( 'crane_sync_predictions_cron' );
-            if ( function_exists( 'as_unschedule_all_actions' ) ) {
-                as_unschedule_all_actions( 'crane_sync_predictions_as' );
-            }
+        // Legacy cleanup
+        wp_clear_scheduled_hook( 'crane_sync_predictions_cron' );
+        if ( function_exists( 'as_unschedule_all_actions' ) ) {
+            as_unschedule_all_actions( 'crane_sync_predictions_as' );
         }
 
         update_option( 'crane_plugin_version', $current_version );
@@ -902,6 +904,59 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         return $schedules;
     }
 
+    /**
+     * Schedule both prediction engines at exact WAT time slots.
+     *
+     * API-Football fires at midnight, 6am, noon, 6pm (WAT = UTC+1).
+     * Forebet scraper fires 30 minutes later: 00:30, 06:30, 12:30, 18:30.
+     *
+     * Both run every 6 hours (crane_6hours interval = 21600 seconds).
+     * WordPress cron uses UTC internally, so all times are converted.
+     *
+     * Safe to call multiple times — skips hooks that are already scheduled.
+     */
+    public static function crane_schedule_prediction_events() {
+        $wat = new DateTimeZone( 'Africa/Lagos' ); // UTC+1
+        $now = new DateTime( 'now', $wat );
+
+        // --- API-Football: slots 00:00, 06:00, 12:00, 18:00 WAT ---
+        if ( ! wp_next_scheduled( 'crane_sync_predictions_cron_v2' ) ) {
+            // Find the next upcoming slot
+            $api_slots_wat = [ '00:00', '06:00', '12:00', '18:00' ];
+            $next_api_ts   = null;
+            foreach ( $api_slots_wat as $slot ) {
+                $candidate = new DateTime( 'today ' . $slot, $wat );
+                if ( $candidate <= $now ) {
+                    $candidate->modify( '+1 day' );
+                }
+                $ts = (int) $candidate->format( 'U' );
+                if ( $next_api_ts === null || $ts < $next_api_ts ) {
+                    $next_api_ts = $ts;
+                }
+            }
+            wp_schedule_event( $next_api_ts, 'crane_6hours', 'crane_sync_predictions_cron_v2' );
+            error_log( 'Crane: Scheduled API-Football at ' . date( 'Y-m-d H:i:s', $next_api_ts ) . ' UTC (next WAT slot).' );
+        }
+
+        // --- Forebet scraper: slots 00:30, 06:30, 12:30, 18:30 WAT ---
+        if ( ! wp_next_scheduled( 'crane_scrape_predictions_cron' ) ) {
+            $scrape_slots_wat = [ '00:30', '06:30', '12:30', '18:30' ];
+            $next_scrape_ts   = null;
+            foreach ( $scrape_slots_wat as $slot ) {
+                $candidate = new DateTime( 'today ' . $slot, $wat );
+                if ( $candidate <= $now ) {
+                    $candidate->modify( '+1 day' );
+                }
+                $ts = (int) $candidate->format( 'U' );
+                if ( $next_scrape_ts === null || $ts < $next_scrape_ts ) {
+                    $next_scrape_ts = $ts;
+                }
+            }
+            wp_schedule_event( $next_scrape_ts, 'crane_6hours', 'crane_scrape_predictions_cron' );
+            error_log( 'Crane: Scheduled Forebet scraper at ' . date( 'Y-m-d H:i:s', $next_scrape_ts ) . ' UTC (next WAT slot).' );
+        }
+    }
+
     public function crane_register_tools_menu() {
         add_menu_page(
             'Crane Bets',
@@ -1048,17 +1103,35 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
 
             <div class="card" style="padding:20px; max-width:700px; margin-top:20px;">
                 <h2>Prediction Sync</h2>
-                <p>Sync status: Next automatic sync in <strong><?php
-                    $next = wp_next_scheduled( 'crane_sync_predictions_cron_v2' );
-                    echo $next ? human_time_diff( time(), $next ) : 'Not scheduled';
-                ?></strong> &nbsp;<em style="color:#888;font-weight:normal;"><?php
-                    if ( $next ) {
-                        $tz = new DateTimeZone( 'Africa/Lagos' );
-                        $dt = new DateTime( '@' . $next );
-                        $dt->setTimezone( $tz );
-                        echo '(' . $dt->format( 'M j, g:i A' ) . ' WAT)';
-                    }
-                ?></em></p>
+                <?php
+                $wat_tz = new DateTimeZone( 'Africa/Lagos' );
+                $next_api    = wp_next_scheduled( 'crane_sync_predictions_cron_v2' );
+                $next_scrape = wp_next_scheduled( 'crane_scrape_predictions_cron' );
+                ?>
+                <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:10px;">
+                    <tr style="border-bottom:1px solid #eee;">
+                        <td style="padding:6px 8px;font-weight:600;">⚡ API-Football sync</td>
+                        <td style="padding:6px 8px;">Runs at <strong>00:00 · 06:00 · 12:00 · 18:00 WAT</strong></td>
+                        <td style="padding:6px 8px;color:#888;"><?php
+                            if ( $next_api ) {
+                                $dt = new DateTime( '@' . $next_api );
+                                $dt->setTimezone( $wat_tz );
+                                echo 'Next: <strong>' . $dt->format( 'M j, g:i A' ) . ' WAT</strong> (' . human_time_diff( time(), $next_api ) . ')';
+                            } else { echo '<span style="color:red;">Not scheduled</span>'; }
+                        ?></td>
+                    </tr>
+                    <tr>
+                        <td style="padding:6px 8px;font-weight:600;">📊 Forebet scraper</td>
+                        <td style="padding:6px 8px;">Runs at <strong>00:30 · 06:30 · 12:30 · 18:30 WAT</strong></td>
+                        <td style="padding:6px 8px;color:#888;"><?php
+                            if ( $next_scrape ) {
+                                $dt2 = new DateTime( '@' . $next_scrape );
+                                $dt2->setTimezone( $wat_tz );
+                                echo 'Next: <strong>' . $dt2->format( 'M j, g:i A' ) . ' WAT</strong> (' . human_time_diff( time(), $next_scrape ) . ')';
+                            } else { echo '<span style="color:red;">Not scheduled</span>'; }
+                        ?></td>
+                    </tr>
+                </table>
                 <p>API Key status: <strong><?php echo get_option('crane_api_football_key') ? 'Set' : 'Not set'; ?></strong></p>
                 <form action="<?php echo admin_url('admin-post.php'); ?>" method="post" style="margin-top:10px;">
                     <input type="hidden" name="action" value="crane_manual_sync">
@@ -1736,10 +1809,9 @@ function crane_bets_core_activation() {
         }
     }
 
-    // Schedule CRON jobs — moved here from constructor to avoid race condition with custom intervals
-    if ( ! wp_next_scheduled( 'crane_sync_predictions_cron_v2' ) ) {
-        wp_schedule_event( time(), 'crane_6hours', 'crane_sync_predictions_cron_v2' );
-    }
+    // Schedule prediction events at exact WAT slots (00:00/06:00/12:00/18:00 API, +30min Forebet)
+    Crane_Bets_Core::crane_schedule_prediction_events();
+
     if ( ! wp_next_scheduled( 'crane_sync_odds_cron' ) ) {
         wp_schedule_event( time(), 'twicedaily', 'crane_sync_odds_cron' );
     }
@@ -1762,6 +1834,7 @@ register_deactivation_hook( __FILE__, 'crane_bets_core_deactivation' );
 function crane_bets_core_deactivation() {
     wp_clear_scheduled_hook( 'crane_sync_predictions_cron' );
     wp_clear_scheduled_hook( 'crane_sync_predictions_cron_v2' );
+    wp_clear_scheduled_hook( 'crane_scrape_predictions_cron' );
     wp_clear_scheduled_hook( 'crane_sync_odds_cron' );
     wp_clear_scheduled_hook( 'crane_cleanup_predictions_cron' );
     wp_clear_scheduled_hook( 'crane_vip_daily_email_cron' );

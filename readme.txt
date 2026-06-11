@@ -3,7 +3,7 @@ Contributors: ashiekaa
 Requires PHP: 7.4
 Requires at least: 6.0
 Tested up to: 6.4
-Version: 1.1.2
+Version: 1.1.3
 License: GPLv2 or later
 
 == Description ==
@@ -15,6 +15,13 @@ Backbone functionality for the Crane Bets platform. Handles VIP subscriptions, p
 3. Configure settings in the Crane Admin panel.
 
 == Changelog ==
+= 1.1.3 =
+* Separated API-Football and Forebet scraper into two independent cron events.
+* API-Football now fires at exact WAT slots: 00:00, 06:00, 12:00, 18:00 (Nigerian time).
+* Forebet scraper fires 30 minutes later: 00:30, 06:30, 12:30, 18:30 WAT.
+* Both still run every 6 hours but are now anchored to fixed clock times.
+* Admin settings page now shows the next scheduled run time for both engines separately.
+
 = 1.1.2 =
 * Reduced prediction sync CRON interval from 2 hours to 6 hours to lower server load.
 * Extended prediction search window from 7 days to 14 days to prevent empty matches during quiet football periods.
