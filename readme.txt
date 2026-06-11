@@ -3,7 +3,7 @@ Contributors: ashiekaa
 Requires PHP: 7.4
 Requires at least: 6.0
 Tested up to: 6.4
-Version: 1.1.3
+Version: 1.1.4
 License: GPLv2 or later
 
 == Description ==
@@ -15,6 +15,12 @@ Backbone functionality for the Crane Bets platform. Handles VIP subscriptions, p
 3. Configure settings in the Crane Admin panel.
 
 == Changelog ==
+= 1.1.4 =
+* Implemented strict, deterministic sync flow (Today -> Tomorrow -> Scan up to 14 days) terminating on the first date with active matches.
+* Set prediction posts to 'draft' status by default. They are only published once a valid, non-pending prediction tip is fetched/scraped.
+* Prevented Forebet matches with empty predictions from publishing or defaulting to 'HOME WIN' (they are skipped entirely).
+* Implemented cross-source merging so Forebet scraper will update and publish existing draft posts once predictions are scraped.
+
 = 1.1.3 =
 * Separated API-Football and Forebet scraper into two independent cron events.
 * API-Football now fires at exact WAT slots: 00:00, 06:00, 12:00, 18:00 (Nigerian time).

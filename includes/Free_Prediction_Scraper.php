@@ -276,92 +276,47 @@ class Crane_Free_Prediction_Scraper {
         $today_dt = new DateTime( 'now', $tz );
         $today_str = $today_dt->format( 'Y-m-d' );
 
-        // DB Guard check: Do we already have matches for today in the database?
-        $has_today = false;
-        $has_today_matches = new WP_Query( array(
-            'post_type'      => 'crane_prediction',
-            'meta_key'       => 'match_date',
-            'meta_value'     => $today_str,
-            'posts_per_page' => 1,
-            'post_status'    => 'any',
-            'fields'         => 'ids',
-        ) );
-        if ( $has_today_matches->have_posts() ) {
-            $has_today = true;
-        }
-        wp_reset_postdata();
-
         $deduped = [];
-        $seen = [];
         $target_date = '';
 
-        if ( $has_today ) {
-            // Lock target to today's date
-            $target_date = $today_str;
-            $today_url = 'https://www.forebet.com/en/football-predictions/' . $target_date;
-            $html = self::fetch_url( $today_url );
+        // Strictly evaluate Today ($i = 0), Tomorrow ($i = 1), and then sequentially scan up to 14 days
+        for ( $i = 0; $i < 14; $i++ ) {
+            $current_dt = clone $today_dt;
+            if ( $i > 0 ) {
+                $current_dt->modify( "+{$i} days" );
+            }
+            $check_date = $current_dt->format( 'Y-m-d' );
+            $check_url = 'https://www.forebet.com/en/football-predictions/' . $check_date;
+
+            $html = self::fetch_url( $check_url );
             $matches = [];
             if ( $html ) {
                 $matches = self::parse_forebet_html( $html );
             }
 
-            // Top up with African leagues for today
-            $africa_html = self::fetch_url( self::FOREBET_AFRICA );
-            if ( $africa_html ) {
-                $africa_matches = self::parse_forebet_html( $africa_html );
-                $matches = array_merge( $matches, $africa_matches );
-            }
-
-            // Deduplicate
-            foreach ( $matches as $m ) {
-                // Force match date to target_date if it belongs to today's fetch
-                $m['date'] = $target_date;
-                $key = strtolower( $m['home'] . '|' . $m['away'] );
-                if ( ! isset( $seen[ $key ] ) ) {
-                    $seen[ $key ] = true;
-                    $deduped[] = $m;
+            // If check date is today, top up with African leagues
+            if ( $i === 0 ) {
+                $africa_html = self::fetch_url( self::FOREBET_AFRICA );
+                if ( $africa_html ) {
+                    $africa_matches = self::parse_forebet_html( $africa_html );
+                    $matches = array_merge( $matches, $africa_matches );
                 }
             }
-        } else {
-            // Loop up to 14 days starting from today to find nearest date with matches
-            for ( $i = 0; $i < 14; $i++ ) {
-                $current_dt = clone $today_dt;
-                if ( $i > 0 ) {
-                    $current_dt->modify( "+{$i} days" );
-                }
-                $check_date = $current_dt->format( 'Y-m-d' );
-                $check_url = 'https://www.forebet.com/en/football-predictions/' . $check_date;
 
-                $html = self::fetch_url( $check_url );
-                $matches = [];
-                if ( $html ) {
-                    $matches = self::parse_forebet_html( $html );
-                }
-
-                // If check date is today, top up with African leagues
-                if ( $i === 0 ) {
-                    $africa_html = self::fetch_url( self::FOREBET_AFRICA );
-                    if ( $africa_html ) {
-                        $africa_matches = self::parse_forebet_html( $africa_html );
-                        $matches = array_merge( $matches, $africa_matches );
+            if ( ! empty( $matches ) ) {
+                $target_date = $check_date;
+                $seen = [];
+                // Deduplicate
+                foreach ( $matches as $m ) {
+                    $m['date'] = $target_date;
+                    $key = strtolower( $m['home'] . '|' . $m['away'] );
+                    if ( ! isset( $seen[ $key ] ) ) {
+                        $seen[ $key ] = true;
+                        $deduped[] = $m;
                     }
                 }
-
-                if ( ! empty( $matches ) ) {
-                    $target_date = $check_date;
-                    // Deduplicate
-                    foreach ( $matches as $m ) {
-                        // Force match date to the target check date
-                        $m['date'] = $target_date;
-                        $key = strtolower( $m['home'] . '|' . $m['away'] );
-                        if ( ! isset( $seen[ $key ] ) ) {
-                            $seen[ $key ] = true;
-                            $deduped[] = $m;
-                        }
-                    }
-                    error_log( 'Crane Forebet: Nearest date with predictions found on ' . $target_date . ' with ' . count( $deduped ) . ' matches.' );
-                    break;
-                }
+                error_log( 'Crane Forebet: Evaluated date ' . $target_date . ' has ' . count( $deduped ) . ' parsed rows. Synced this date and terminating check loop.' );
+                break; // Stop looking ahead
             }
         }
 
@@ -800,6 +755,17 @@ class Crane_Free_Prediction_Scraper {
         $away = sanitize_text_field( $data['away'] ?? '' );
         if ( empty( $home ) || empty( $away ) ) return false;
 
+        // CRITICAL CHECK: Skip completely if there is no scraped prediction
+        $raw_pred = $data['prediction'] ?? '';
+        if ( empty( $raw_pred ) ) {
+            return false;
+        }
+
+        $verdict = self::build_verdict( $home, $away, $raw_pred );
+        if ( empty( $verdict ) ) {
+            return false;
+        }
+
         // Use the date provided in the scraped/fetched data, fallback to WAT current date
         $match_date = ! empty( $data['date'] ) ? sanitize_text_field( $data['date'] ) : '';
         if ( empty( $match_date ) ) {
@@ -808,6 +774,9 @@ class Crane_Free_Prediction_Scraper {
         }
 
         $guid  = md5( strtolower( $home ) . strtolower( $away ) . $match_date );
+
+        $post_id = 0;
+        $is_update = false;
 
         // Deduplication check 1: Direct GUID lookup
         $existing = new WP_Query( [
@@ -818,61 +787,78 @@ class Crane_Free_Prediction_Scraper {
             'posts_per_page' => 1,
             'fields'         => 'ids',
         ] );
-        if ( $existing->have_posts() ) return false;
-
-        // Deduplication check 2: 3-day window fuzzy cross-source check (resolves date-shifts/timezone differences)
-        $date_window = [
-            gmdate( 'Y-m-d', strtotime( '-1 day' ) ),
-            gmdate( 'Y-m-d' ),
-            gmdate( 'Y-m-d', strtotime( '+1 day' ) ),
-        ];
-        $existing_window = new WP_Query( [
-            'post_type'      => 'crane_prediction',
-            'post_status'    => 'any',
-            'posts_per_page' => 150,
-            'meta_query'     => [
-                [
-                    'key'     => 'match_date',
-                    'value'   => $date_window,
-                    'compare' => 'IN',
+        
+        if ( $existing->have_posts() ) {
+            $post_id = $existing->posts[0];
+            $is_update = true;
+        } else {
+            // Deduplication check 2: 3-day window fuzzy cross-source check
+            $date_window = [
+                gmdate( 'Y-m-d', strtotime( '-1 day' ) ),
+                gmdate( 'Y-m-d' ),
+                gmdate( 'Y-m-d', strtotime( '+1 day' ) ),
+            ];
+            $existing_window = new WP_Query( [
+                'post_type'      => 'crane_prediction',
+                'post_status'    => 'any',
+                'posts_per_page' => 150,
+                'meta_query'     => [
+                    [
+                        'key'     => 'match_date',
+                        'value'   => $date_window,
+                        'compare' => 'IN',
+                    ]
                 ]
-            ]
-        ] );
+            ] );
 
-        if ( $existing_window->have_posts() ) {
-            foreach ( $existing_window->posts as $ex_post ) {
-                $ex_home = get_post_meta( $ex_post->ID, 'team1_name', true );
-                $ex_away = get_post_meta( $ex_post->ID, 'team2_name', true );
-                if ( self::teams_are_similar( $ex_home, $home ) && self::teams_are_similar( $ex_away, $away ) ) {
-                    error_log( "Crane Scraper: Blocked duplicate match found via fuzzy matching: {$home} vs {$away} (Existing: {$ex_home} vs {$ex_away})" );
-                    return false;
+            if ( $existing_window->have_posts() ) {
+                foreach ( $existing_window->posts as $ex_post ) {
+                    $ex_home = get_post_meta( $ex_post->ID, 'team1_name', true );
+                    $ex_away = get_post_meta( $ex_post->ID, 'team2_name', true );
+                    if ( self::teams_are_similar( $ex_home, $home ) && self::teams_are_similar( $ex_away, $away ) ) {
+                        $post_id = $ex_post->ID;
+                        $is_update = true;
+                        break;
+                    }
                 }
             }
         }
 
-        // Build the VERDICT label
-        $verdict = self::build_verdict( $home, $away, $data['prediction'] ?? '1' );
+        if ( $is_update && $post_id ) {
+            $ex_tip = get_post_meta( $post_id, '_crane_free_tip', true );
+            // If it already has a valid prediction, skip updating
+            if ( ! empty( $ex_tip ) && $ex_tip !== 'PREDICTION PENDING' ) {
+                return false;
+            }
+            
+            // Update the existing draft post status to publish since we now have a tip
+            wp_update_post( [
+                'ID'          => $post_id,
+                'post_status' => 'publish',
+            ] );
+        } else {
+            // Insert a new post
+            $admin_users = get_users( [ 'role' => 'administrator', 'fields' => 'ids', 'number' => 1 ] );
+            $author_id   = ! empty( $admin_users ) ? $admin_users[0] : 1;
 
-        // Get logos via TheSportsDB (reuse existing method if available)
+            $post_id = wp_insert_post( [
+                'post_title'  => $home . ' vs ' . $away,
+                'post_status' => 'publish',
+                'post_type'   => 'crane_prediction',
+                'post_author' => $author_id,
+                'post_date'   => current_time( 'mysql' ),
+            ] );
+        }
+
+        if ( ! $post_id || is_wp_error( $post_id ) ) return false;
+
+        // Get logos via TheSportsDB
         $home_logo = '';
         $away_logo = '';
         if ( class_exists( 'Crane_Prediction_API_Service' ) ) {
             $home_logo = Crane_Prediction_API_Service::get_team_logo( $home );
             $away_logo = Crane_Prediction_API_Service::get_team_logo( $away );
         }
-
-        $admin_users = get_users( [ 'role' => 'administrator', 'fields' => 'ids', 'number' => 1 ] );
-        $author_id   = ! empty( $admin_users ) ? $admin_users[0] : 1;
-
-        $post_id = wp_insert_post( [
-            'post_title'  => $home . ' vs ' . $away,
-            'post_status' => 'publish',
-            'post_type'   => 'crane_prediction',
-            'post_author' => $author_id,
-            'post_date'   => current_time( 'mysql' ),
-        ] );
-
-        if ( ! $post_id || is_wp_error( $post_id ) ) return false;
 
         // Core card fields (identical to Prediction_API_Service)
         update_post_meta( $post_id, 'team1_name',    $home );
@@ -884,7 +870,7 @@ class Crane_Free_Prediction_Scraper {
         update_post_meta( $post_id, 'match_date',    $match_date );
         update_post_meta( $post_id, 'match_status',  'NS' );
 
-        // Odds (available from Odds API; empty string from Forebet)
+        // Odds
         update_post_meta( $post_id, 'match_odd1',    sanitize_text_field( $data['odd1'] ?? '' ) );
         update_post_meta( $post_id, 'match_oddX',    sanitize_text_field( $data['oddX'] ?? '' ) );
         update_post_meta( $post_id, 'match_odd2',    sanitize_text_field( $data['odd2'] ?? '' ) );
@@ -903,7 +889,7 @@ class Crane_Free_Prediction_Scraper {
         // Deduplication key
         update_post_meta( $post_id, '_crane_pred_guid', $guid );
 
-        // Build _crane_prediction_analysis JSON (for the probability bars on single page)
+        // Build _crane_prediction_analysis JSON
         if ( ! empty( $data['home_prob'] ) ) {
             $analysis = [
                 'predictions' => [
@@ -944,7 +930,7 @@ class Crane_Free_Prediction_Scraper {
             case '12':
                 return strtoupper( $home ) . ' OR ' . strtoupper( $away );
             default:
-                return strtoupper( $home ) . ' WIN';
+                return '';
         }
     }
 

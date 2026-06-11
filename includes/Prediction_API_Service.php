@@ -294,44 +294,36 @@ class Crane_Prediction_API_Service {
             return;
         }
 
-        // Search for nearest date with active matches in Lagos timezone (up to 14 days)
         $tz = new DateTimeZone( 'Africa/Lagos' );
         $today_dt = new DateTime( 'now', $tz );
         
         $fixtures = array();
         $target_date = '';
         $target_year = (int)$today_dt->format( 'Y' );
+        $skip_statuses = [ 'FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO', 'PST' ];
 
-        // DB Guard check: Do we already have matches for today in the database?
-        $has_today_query = new WP_Query( array(
-            'post_type'      => 'crane_prediction',
-            'meta_key'       => 'match_date',
-            'meta_value'     => $today_dt->format( 'Y-m-d' ),
-            'posts_per_page' => 1,
-            'post_status'    => 'any',
-            'fields'         => 'ids',
-        ) );
-        $has_today = $has_today_query->have_posts();
-        wp_reset_postdata();
+        // Strictly evaluate Today ($i = 0), Tomorrow ($i = 1), and then sequentially scan up to 14 days
+        for ( $i = 0; $i < 14; $i++ ) {
+            $current_dt = clone $today_dt;
+            if ( $i > 0 ) {
+                $current_dt->modify( "+{$i} days" );
+            }
+            $check_date = $current_dt->format( 'Y-m-d' );
+            $check_year = (int)$current_dt->format( 'Y' );
 
-        if ( $has_today ) {
-            // If today matches already exist locally, lock target to today (do not jump to future dates)
-            $target_date = $today_dt->format( 'Y-m-d' );
-            $target_year = (int)$today_dt->format( 'Y' );
-
-            $fixtures = self::api_request( '/fixtures', array(
-                'date'     => $target_date,
+            $fixtures_candidate = self::api_request( '/fixtures', array(
+                'date'     => $check_date,
                 'timezone' => 'Africa/Lagos',
             ), 120 ); // Cache for 120 minutes
 
-            if ( ! is_array( $fixtures ) ) {
-                $fixtures = array();
+            if ( ! is_array( $fixtures_candidate ) ) {
+                $fixtures_candidate = array();
             }
 
-            // ── Priority league ID top-up ─────────────────────────────────────
+            // ── Priority league ID top-up for this check date ─────────────────
             $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
             $existing_ids = array();
-            foreach ( $fixtures as $f ) {
+            foreach ( $fixtures_candidate as $f ) {
                 if ( isset( $f['fixture']['id'] ) ) {
                     $existing_ids[ $f['fixture']['id'] ] = true;
                 }
@@ -340,8 +332,8 @@ class Crane_Prediction_API_Service {
             foreach ( $priority_league_ids as $lid ) {
                 $extra = self::api_request( '/fixtures', array(
                     'league'   => $lid,
-                    'season'   => $target_year,
-                    'date'     => $target_date,
+                    'season'   => $check_year,
+                    'date'     => $check_date,
                     'timezone' => 'Africa/Lagos',
                 ), 120 );
 
@@ -349,75 +341,28 @@ class Crane_Prediction_API_Service {
                     foreach ( $extra as $ef ) {
                         $efid = $ef['fixture']['id'] ?? 0;
                         if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
-                            $fixtures[]              = $ef;
+                            $fixtures_candidate[]    = $ef;
                             $existing_ids[ $efid ]   = true;
                         }
                     }
                 }
             }
-        } else {
-            // Loop up to 14 days starting from today to find the nearest date with matches
-            for ( $i = 0; $i < 14; $i++ ) {
-                $current_dt = clone $today_dt;
-                if ( $i > 0 ) {
-                    $current_dt->modify( "+{$i} days" );
+
+            // Filter out completed/cancelled matches to see if we have actionable matches
+            $active_count = 0;
+            foreach ( $fixtures_candidate as $fixture ) {
+                $status_short = isset($fixture['fixture']['status']['short']) ? $fixture['fixture']['status']['short'] : 'NS';
+                if ( ! in_array( $status_short, $skip_statuses, true ) ) {
+                    $active_count++;
                 }
-                $check_date = $current_dt->format( 'Y-m-d' );
-                $check_year = (int)$current_dt->format( 'Y' );
+            }
 
-                $fixtures = self::api_request( '/fixtures', array(
-                    'date'     => $check_date,
-                    'timezone' => 'Africa/Lagos',
-                ), 120 ); // Cache for 120 minutes
-
-                if ( ! is_array( $fixtures ) ) {
-                    $fixtures = array();
-                }
-
-                // ── Priority league ID top-up for this check date ─────────────────
-                $priority_league_ids = array( 1, 4, 9, 2, 3, 848 );
-                $existing_ids = array();
-                foreach ( $fixtures as $f ) {
-                    if ( isset( $f['fixture']['id'] ) ) {
-                        $existing_ids[ $f['fixture']['id'] ] = true;
-                    }
-                }
-
-                foreach ( $priority_league_ids as $lid ) {
-                    $extra = self::api_request( '/fixtures', array(
-                        'league'   => $lid,
-                        'season'   => $check_year,
-                        'date'     => $check_date,
-                        'timezone' => 'Africa/Lagos',
-                    ), 120 );
-
-                    if ( is_array( $extra ) && ! empty( $extra ) ) {
-                        foreach ( $extra as $ef ) {
-                            $efid = $ef['fixture']['id'] ?? 0;
-                            if ( $efid && ! isset( $existing_ids[ $efid ] ) ) {
-                                $fixtures[]              = $ef;
-                                $existing_ids[ $efid ]   = true;
-                            }
-                        }
-                    }
-                }
-
-                // Filter out completed/cancelled matches to see if we have actionable matches
-                $active_count = 0;
-                $skip_statuses = [ 'FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO', 'PST' ];
-                foreach ( $fixtures as $fixture ) {
-                    $status_short = isset($fixture['fixture']['status']['short']) ? $fixture['fixture']['status']['short'] : 'NS';
-                    if ( ! in_array( $status_short, $skip_statuses, true ) ) {
-                        $active_count++;
-                    }
-                }
-
-                if ( $active_count > 0 ) {
-                    $target_date = $check_date;
-                    $target_year = $check_year;
-                    error_log( 'Crane API-Football: Nearest date with active matches found on ' . $target_date . ' with ' . $active_count . ' fixtures.' );
-                    break;
-                }
+            if ( $active_count > 0 ) {
+                $fixtures = $fixtures_candidate;
+                $target_date = $check_date;
+                $target_year = $check_year;
+                error_log( 'Crane API-Football: Evaluated date ' . $target_date . ' has ' . $active_count . ' active matches. Synced this date and terminating check loop.' );
+                break; // Stop looking ahead
             }
         }
 
@@ -451,12 +396,9 @@ class Crane_Prediction_API_Service {
             $match_date   = isset($fixture['fixture']['date']) ? $fixture['fixture']['date'] : '';
 
             // ── Skip finished / cancelled / postponed matches ─────────────────
-            // These are useless for predictions and caused PENDING cards on the front page.
-            $skip_statuses = [ 'FT', 'AET', 'PEN', 'CANC', 'ABD', 'AWD', 'WO', 'PST' ];
             if ( in_array( $status_short, $skip_statuses, true ) ) continue;
 
             // ── Parse match time in WAT (Africa/Lagos) ────────────────────────
-            // API-Football sends ISO 8601 UTC timestamps; we convert to WAT for display.
             $match_dt = new DateTime( $match_date );       // Parse as UTC
             $match_dt->setTimezone( $tz );                 // Convert to Africa/Lagos (WAT = UTC+1)
 
@@ -466,11 +408,10 @@ class Crane_Prediction_API_Service {
                 $elapsed = isset($fixture['fixture']['status']['elapsed']) ? $fixture['fixture']['status']['elapsed'] : '';
                 $time_display = 'LIVE ' . $elapsed . "'";
             } else {
-                // Not started — store clean 24-hr WAT time (e.g. "20:45")
                 $time_display = $match_dt->format( 'H:i' );
             }
 
-            // Use WAT date for match_date meta (not raw UTC date from the API string)
+            // Use WAT date for match_date meta
             $match_date_wat = $match_dt->format( 'Y-m-d' );
 
             // Teams
@@ -479,40 +420,51 @@ class Crane_Prediction_API_Service {
             $home_logo = isset($fixture['teams']['home']['logo']) ? $fixture['teams']['home']['logo'] : '';
             $away_logo = isset($fixture['teams']['away']['logo']) ? $fixture['teams']['away']['logo'] : '';
 
-            // If API-Football logos are missing, try TheSportsDB
             if ( empty( $home_logo ) ) $home_logo = self::get_team_logo( $home_name );
             if ( empty( $away_logo ) ) $away_logo = self::get_team_logo( $away_name );
 
             // League
             $league = isset($fixture['league']['name']) ? $fixture['league']['name'] : 'Unknown League';
 
-            // Odds (use defaults if not available from this endpoint)
+            // Odds
             $odd1 = '—';
             $oddX = '—';
             $odd2 = '—';
 
+            // Check if there is already a valid prediction stored
+            $existing_tip = '';
+            if ( isset( $existing_fixtures[ $fixture_id ] ) ) {
+                $existing_tip = get_post_meta( $existing_fixtures[ $fixture_id ], '_crane_free_tip', true );
+            }
+
+            // Determine if the post should be published or draft
+            $post_status = 'draft';
+            if ( ! empty( $existing_tip ) && $existing_tip !== 'PREDICTION PENDING' ) {
+                $post_status = 'publish';
+            }
 
             if ( isset( $existing_fixtures[ $fixture_id ] ) ) {
                 // UPDATE existing post
                 $post_id = $existing_fixtures[ $fixture_id ];
                 wp_update_post( array(
-                    'ID'         => $post_id,
-                    'post_title' => $home_name . ' vs ' . $away_name,
+                    'ID'          => $post_id,
+                    'post_title'  => $home_name . ' vs ' . $away_name,
+                    'post_status' => $post_status,
                 ) );
             } else {
-                // CREATE new post
+                // CREATE new post (initially as draft)
                 $post_id = wp_insert_post( array(
                     'post_title'  => $home_name . ' vs ' . $away_name,
                     'post_type'   => 'crane_prediction',
-                    'post_status' => 'publish',
-                    'post_content' => '',
+                    'post_status' => $post_status,
+                    'post_content'=> '',
                 ) );
             }
             wp_reset_postdata();
 
             if ( ! $post_id || is_wp_error( $post_id ) ) continue;
 
-            // Set all meta fields matching front-page.php expectations
+            // Set all meta fields
             update_post_meta( $post_id, 'fixture_id', $fixture_id );
             update_post_meta( $post_id, 'team1_name', $home_name );
             update_post_meta( $post_id, 'team2_name', $away_name );
@@ -526,29 +478,32 @@ class Crane_Prediction_API_Service {
             update_post_meta( $post_id, 'match_status', $status_short );
             update_post_meta( $post_id, 'match_date', $match_date_wat );
 
-            // NEW: Fetch and Store Real API Prediction (Hardened)
-            $existing_tip = get_post_meta( $post_id, '_crane_free_tip', true );
+            // Fetch and Store Real API Prediction
             static $pred_count = 0;
             $pred_limit = 5; // Max 5 premium API tips per sync cycle to save quota
 
-            if ( empty( $existing_tip ) && $status_short === 'NS' && $pred_count < $pred_limit ) {
+            if ( ( empty( $existing_tip ) || $existing_tip === 'PREDICTION PENDING' ) && $status_short === 'NS' && $pred_count < $pred_limit ) {
                 $last_check = (int) get_post_meta( $post_id, '_crane_last_api_check', true );
                 $now = time();
                 
-                // 24-hour cooldown (86400 seconds) to prevent spamming empty API predictions
                 if ( ! $last_check || ( $now - $last_check ) > 86400 ) {
                     $pred_data = self::api_request( '/predictions', array( 'fixture' => $fixture_id ) );
                     update_post_meta( $post_id, '_crane_last_api_check', $now );
-                    $pred_count++; // Increment quota counter since we made an API request
+                    $pred_count++;
                     
-                    // Array Safety Check (Fatal Error Prevention)
                     if ( is_array( $pred_data ) && ! empty( $pred_data ) && isset( $pred_data[0]['predictions'] ) ) {
                         $winner_name = !empty($pred_data[0]['predictions']['winner']['name']) ? $pred_data[0]['predictions']['winner']['name'] : '';
                         if ( $winner_name ) {
-                            update_post_meta( $post_id, '_crane_free_tip', $winner_name . ' Win' );
+                            $free_tip = $winner_name . ' Win';
+                            update_post_meta( $post_id, '_crane_free_tip', $free_tip );
+                            
+                            // Publish the post now that we have a valid prediction!
+                            wp_update_post( array(
+                                'ID'          => $post_id,
+                                'post_status' => 'publish',
+                            ) );
                         }
                         
-                        // Persist the entire rich analysis block for the Single Template
                         update_post_meta( $post_id, '_crane_prediction_analysis', json_encode( $pred_data[0] ) );
                     }
                 }
