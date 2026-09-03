@@ -180,7 +180,6 @@ class Crane_VIP_Service {
         if ( ! $user_id ) return;
 
         $vip_product_id = (int) get_option( 'crane_vip_product_id', 0 );
-        if ( ! $vip_product_id ) return;
 
         foreach ( $order->get_items() as $item ) {
             $product = $item->get_product();
@@ -189,10 +188,18 @@ class Crane_VIP_Service {
             $current_product_id = (int) $product->get_id();
             $parent_id         = (int) $product->get_parent_id();
 
-            if ( $current_product_id === $vip_product_id || $parent_id === $vip_product_id ) {
+            $is_vip_item = ( $vip_product_id && ( $current_product_id === $vip_product_id || $parent_id === $vip_product_id ) );
+            if ( ! $is_vip_item ) {
+                $name = strtolower( $product->get_name() );
+                if ( strpos( $name, 'vip' ) !== false || has_term( array( 'vip', 'inner-circle' ), 'product_cat', $current_product_id ) ) {
+                    $is_vip_item = true;
+                }
+            }
+
+            if ( $is_vip_item ) {
                 $quantity = (int) $item->get_quantity();
                 $days_to_add = $quantity * 30;
-                $tier = get_post_meta( $vip_product_id, '_crane_vip_tier', true ) ?: 'pro';
+                $tier = ( $vip_product_id ? get_post_meta( $vip_product_id, '_crane_vip_tier', true ) : '' ) ?: 'pro';
 
                 // Handle Stacking Logic (Architectural Fix #3)
                 $now = current_time( 'timestamp' );
