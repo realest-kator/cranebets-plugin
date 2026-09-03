@@ -209,11 +209,20 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             return $response;
         }
         $data = $response->get_data();
-        $tid = $order->get_meta( 'billing_telegram_id' ) ?: $order->get_meta( 'telegram_id' );
-        $data['billing_telegram_id'] = $tid;
-        $data['telegram_id'] = $tid;
+        $order_id = $order->get_id();
+        $tid = $order->get_meta( 'billing_telegram_id' ) 
+            ?: $order->get_meta( 'telegram_id' )
+            ?: get_post_meta( $order_id, 'billing_telegram_id', true )
+            ?: get_post_meta( $order_id, 'telegram_id', true );
+
+        if ( empty( $tid ) && $order->get_customer_id() ) {
+            $tid = get_user_meta( $order->get_customer_id(), 'crane_telegram_id', true );
+        }
+
+        $data['billing_telegram_id'] = $tid ? (string) $tid : '';
+        $data['telegram_id']         = $tid ? (string) $tid : '';
         if ( isset( $data['billing'] ) && is_array( $data['billing'] ) ) {
-            $data['billing']['telegram_id'] = $tid;
+            $data['billing']['telegram_id'] = $tid ? (string) $tid : '';
         }
         $response->set_data( $data );
         return $response;
