@@ -169,8 +169,11 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
             remove_action( 'woocommerce_no_products_found', 'wc_no_products_found' );
             add_action( 'woocommerce_no_products_found', array( $this, 'crane_empty_shop_ux' ) );
 
-            // UX: Direct Checkout
+            // UX: Direct Express Paystack Checkout
             add_filter( 'woocommerce_add_to_cart_redirect', array( $this, 'crane_skip_cart_redirect' ) );
+
+            // REST API: Expose Telegram ID for Python Bot Poller
+            add_filter( 'woocommerce_rest_prepare_shop_order_object', array( $this, 'crane_rest_expose_telegram_id' ), 10, 3 );
         }
     }
 
@@ -186,9 +189,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
     }
 
     /**
-     * UX: Skip Cart Page for Frictionless Path (Conditional Guard)
-     * Only redirect to checkout for Predictions and VIP.
-     * Merchandise (Jerseys) should stay in the shop for multi-item sales.
+     * UX: Skip Cart and Checkout Pages for Seamless Express Paystack Payment
      */
     public function crane_skip_cart_redirect( $url ) {
         if ( ! isset( $_REQUEST['add-to-cart'] ) || ! is_numeric( $_REQUEST['add-to-cart'] ) ) return $url;
@@ -197,15 +198,25 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         $product = wc_get_product( $product_id );
         if ( ! $product ) return $url;
 
-        // One-Click Categories
-        $is_vip = ( $product_id === (int) get_option( 'crane_vip_product_id' ) );
-        $is_prediction = has_term( 'predictions', 'product_cat', $product_id );
+        return add_query_arg( 'crane_express_pay', $product_id, home_url( '/' ) );
+    }
 
-        if ( $is_vip || $is_prediction ) {
-            return wc_get_checkout_url();
+    /**
+     * REST API Exposure for Telegram Bot Poller
+     */
+    public function crane_rest_expose_telegram_id( $response, $order, $request ) {
+        if ( ! is_a( $response, 'WP_REST_Response' ) || ! is_a( $order, 'WC_Order' ) ) {
+            return $response;
         }
-
-        return $url;
+        $data = $response->get_data();
+        $tid = $order->get_meta( 'billing_telegram_id' ) ?: $order->get_meta( 'telegram_id' );
+        $data['billing_telegram_id'] = $tid;
+        $data['telegram_id'] = $tid;
+        if ( isset( $data['billing'] ) && is_array( $data['billing'] ) ) {
+            $data['billing']['telegram_id'] = $tid;
+        }
+        $response->set_data( $data );
+        return $response;
     }
 
     /**
@@ -882,6 +893,9 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         register_setting('crane_api_options', 'crane_api_newsdata');
         register_setting('crane_api_options', 'crane_paystack_secret_key');
         register_setting('crane_api_options', 'crane_vip_product_id');
+        register_setting('crane_api_options', 'crane_telegram_bot_username');
+        register_setting('crane_api_options', 'crane_telegram_product_id');
+        register_setting('crane_api_options', 'crane_telegram_webhook_url');
         register_setting('crane_api_options', 'crane_purge_on_uninstall');
         register_setting('crane_api_options', 'crane_custom_rss_feeds');
         register_setting('crane_api_options', 'crane_news_import_category');
@@ -1095,6 +1109,33 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                                 <?php endforeach; ?>
                             </select>
                             <p class="description">Select the WooCommerce product that users purchase to gain VIP status.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Telegram Bot Username</th>
+                        <td>
+                            <input type="text" name="crane_telegram_bot_username" value="<?php echo esc_attr( get_option('crane_telegram_bot_username', 'RealSplashBot') ); ?>" style="width:100%" placeholder="e.g. RealSplashBot (without @)" />
+                            <p class="description">Your Telegram bot username. Displayed on the post-payment activation screen.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Telegram Bot Product Mapping</th>
+                        <td>
+                            <?php $selected_tg_product = (int) get_option('crane_telegram_product_id', 37858 ); ?>
+                            <select name="crane_telegram_product_id" style="width:100%">
+                                <option value="0">-- Auto-detect (Product ID 37858 or title matching 'bot'/'telegram') --</option>
+                                <?php foreach ( $products as $p ) : ?>
+                                    <option value="<?php echo $p->ID; ?>" <?php selected( $selected_tg_product, $p->ID ); ?>><?php echo esc_html( $p->post_title ); ?> (ID: <?php echo $p->ID; ?>)</option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="description">Select the WooCommerce product designated as the Telegram Bot subscription.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Telegram Bot Webhook URL (Optional)</th>
+                        <td>
+                            <input type="text" name="crane_telegram_webhook_url" value="<?php echo esc_attr( get_option('crane_telegram_webhook_url') ); ?>" style="width:100%" placeholder="e.g. http://127.0.0.1:8443/wc-webhook" />
+                            <p class="description">Optional webhook endpoint to receive real-time activation alerts alongside automated REST polling.</p>
                         </td>
                     </tr>
                 </table>
