@@ -903,6 +903,7 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
         register_setting('crane_api_options', 'crane_paystack_secret_key');
         register_setting('crane_api_options', 'crane_vip_product_id');
         register_setting('crane_api_options', 'crane_telegram_bot_username');
+        register_setting('crane_api_options', 'crane_telegram_bot_token');
         register_setting('crane_api_options', 'crane_telegram_product_id');
         register_setting('crane_api_options', 'crane_telegram_webhook_url');
         register_setting('crane_api_options', 'crane_purge_on_uninstall');
@@ -1125,6 +1126,13 @@ if ( ! class_exists( 'Crane_Bets_Core' ) ) {
                         <td>
                             <input type="text" name="crane_telegram_bot_username" value="<?php echo esc_attr( get_option('crane_telegram_bot_username', 'RealSplashBot') ); ?>" style="width:100%" placeholder="e.g. RealSplashBot (without @)" />
                             <p class="description">Your Telegram bot username. Displayed on the post-payment activation screen.</p>
+                        </td>
+                    </tr>
+                    <tr valign="top">
+                        <th scope="row">Telegram Bot Token</th>
+                        <td>
+                            <input type="password" name="crane_telegram_bot_token" value="<?php echo esc_attr( get_option('crane_telegram_bot_token', '') ); ?>" style="width:100%" placeholder="e.g. 7123456789:AAHxxxxxxxxxxxxx" />
+                            <p class="description">Your bot token from @BotFather. Used to verify the subscriber's real Telegram name on the thank-you page and send a welcome message to their Telegram account after activation.</p>
                         </td>
                     </tr>
                     <tr valign="top">
